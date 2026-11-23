@@ -1,0 +1,202 @@
+@media (prefers-color-scheme: dark) {
+    span.nc {
+        text-decoration: none !important;
+    }
+}
+
+.admonition-manim-example {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.admonition-manim-example p.admonition-title {
+    font-weight: 600;
+    font-size: 0.925rem;
+    margin: 0;
+}
+
+.admonition-manim-example .highlight-python {
+    margin: 0;
+}
+
+.admonition-manim-example .highlight {
+    border-radius: 0;
+}
+
+.admonition-manim-example .highlight pre {
+    font-size: 15px;
+}
+
+.manim-video {
+    width: 100%;
+    padding: 8px 0;
+    outline: 0;
+}
+
+.admonition-manim-example .manim-video {
+    padding: 0;
+}
+
+.admonition-manim-example img {
+    margin-bottom: 0;
+}
+
+.admonition-manim-example p:last-child {
+    margin-top: 0;
+    padding-left: 0.5rem;
+    padding-bottom: 0.15rem;
+    font-size: 15px;
+}
+
+.admonition-manim-example .copybtn {
+    margin-right: 6px;
+    font-size: 18px;
+}
+
+.admonition-manim-example .copybtn:hover {
+    cursor: pointer;
+}
+
+p.rubric {
+    text-transform: capitalize;
+    font-size: 1.25rem;
+    font-weight: bold;
+}
+
+.sig-param {
+    color: var(--color-content-foreground);
+}
+
+dl.c .field-list dt,
+dl.cpp .field-list dt,
+dl.js .field-list dt,
+dl.py .field-list dt {
+    text-transform: capitalize;
+    font-weight: bold;
+    font-size: var(--font-size--normal);
+}
+
+h4,
+h5,
+h6 {
+    text-transform: none;
+}
+
+/* yikes-ish attempt at bugfix for navbar on some browsers */
+.sidebar-tree a.internal.reference {
+    display: table-cell;
+}
+
+.manim-binder-button {
+    text-transform: capitalize;
+    padding: 10px 20px;
+    margin: 10px 0;
+}
+
+.manim-binder-wrapper {
+    background-color: var(--color-code-background);
+    color: var(--color-code-foreground);
+}
+
+.manim-binder-title {
+    margin-top: 0;
+}
+
+.manim-binder-button-wrapper {
+    margin: 0px 10px;
+}
+
+:root {
+    --collapsed-layout-width: 82em;
+}
+
+.drawer-toggle {
+    display: none;
+    align-items: center;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--color-foreground-secondary);
+}
+
+.drawer-toggle:hover {
+    color: var(--color-foreground-primary);
+}
+
+.drawer-toggle svg {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+.drawer-toggle .when-collapsed,
+.sidebar-collapsed .drawer-toggle-sidebar .when-shown,
+.toc-collapsed .drawer-toggle-toc .when-shown {
+    display: none;
+}
+
+.sidebar-collapsed .drawer-toggle-sidebar .when-collapsed,
+.toc-collapsed .drawer-toggle-toc .when-collapsed {
+    display: inline;
+}
+
+/* In the content's left padding (3em), level with the page icons, so that
+   it does not push the title aside. */
+.content {
+    position: relative;
+}
+
+.drawer-toggle-sidebar {
+    position: absolute;
+    top: 1.5rem;
+    left: 0.75rem;
+    height: 1.5rem;
+}
+
+@media (width > 63em) {
+    .drawer-toggle-sidebar {
+        display: flex;
+    }
+
+    .sidebar-collapsed .sidebar-drawer {
+        display: none;
+    }
+
+    .sidebar-collapsed .main {
+        max-width: var(--collapsed-layout-width);
+        margin-inline: auto;
+    }
+
+    .sidebar-collapsed .content {
+        flex: 1;
+        min-width: 0;
+    }
+}
+
+@media (width > 82em) {
+    .drawer-toggle-toc {
+        display: flex;
+    }
+
+    .toc-collapsed .toc-drawer {
+        display: none;
+    }
+
+    .toc-collapsed .sidebar-drawer {
+        width: calc((100% - var(--collapsed-layout-width)) / 2 + 15em);
+    }
+
+    .toc-collapsed .main {
+        max-width: calc(var(--collapsed-layout-width) - 15em);
+    }
+
+    .sidebar-collapsed.toc-collapsed .main {
+        max-width: var(--collapsed-layout-width);
+    }
+
+    .toc-collapsed .content {
+        flex: 1;
+        min-width: 0;
+    }
+}

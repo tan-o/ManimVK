@@ -1,0 +1,23 @@
+[package]
+name = "manim_vk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "manim_vk"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py311"] }
+ash = "0.38"
+winit = "0.30"
+raw-window-handle = "0.6"
+pixels = "0.15"
+skia-safe = { version = "0.157", default-features = false, features = ["binary-cache", "embed-icudtl", "ganesh", "gl", "jpeg", "pdf", "textlayout", "vulkan"] }
+
+[patch.crates-io]
+ash = { path = "third_party/ash-0.37.3" }
+
+
+
