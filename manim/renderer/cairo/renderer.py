@@ -379,6 +379,10 @@ class CairoRenderer(_RendererExecutionView):
         self.static_image = self.get_frame()
         return self.static_image
 
+    def discard_static_frame(self) -> None:
+        """Forget the static background of the finished play."""
+        self.static_image = None
+
     def update_skipping_status(self) -> None:
         self._scene._get_manager()._update_skipping_status()
 

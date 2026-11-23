@@ -1,0 +1,160 @@
+"""Skia frames start from GPU-resident layers instead of uploading pixels.
+
+Runs without a GPU: the native module is replaced by a recorder, so these tests
+check the renderer's calls (one path call per VMobject, one static capture per
+play, no per-frame pixel uploads), not pixels.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+import numpy as np
+import pytest
+
+from manim import (
+    Circle,
+    Scene,
+    Square,
+    ValueTracker,
+    Vector,
+    VGroup,
+    tempconfig,
+)
+from manim.renderer.cairo.rendering import _CairoDrawingContext
+from manim.renderer.skia import renderer as skia_renderer
+from manim.renderer.skia.rendering import SkiaDrawingContext
+
+
+class _RecordingTarget:
+    def __init__(self, calls: Counter, width: int, height: int) -> None:
+        self.calls, self.width, self.height = calls, width, height
+        self.static = False
+
+    def __getattr__(self, name):
+        def record(*args, **kwargs):
+            self.calls[name] += 1
+
+        return record
+
+    def capture_static_layer(self):
+        self.calls["capture_static_layer"] += 1
+        self.static = True
+
+    def clear_static_layer(self):
+        self.static = False
+
+    def restore_static_layer(self):
+        self.calls["restore_static_layer"] += 1
+        return self.static
+
+    def commit_into(self, frame):
+        self.calls["commit_into"] += 1
+        frame[...] = 0
+
+
+class _RecordingDevice:
+    calls: Counter = Counter()
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def device_name(self) -> str:
+        return "recorder"
+
+    def create_skia_target(self, width, height):
+        return _RecordingTarget(self.calls, width, height)
+
+
+@pytest.fixture
+def calls(monkeypatch):
+    _RecordingDevice.calls = Counter()
+    monkeypatch.setattr(skia_renderer.manim_vk, "Device", _RecordingDevice)
+    return _RecordingDevice.calls
+
+
+class _Moving(Scene):
+    def construct(self):
+        self.add(VGroup(*[Square().shift(i * 0.5 * np.array([1.0, 0, 0])) for i in range(4)]))
+        tracker = ValueTracker(0)
+        vectors = [Vector([1, 0, 0]) for _ in range(5)]
+        for index, vector in enumerate(vectors):
+            vector.add_updater(
+                lambda v, index=index: v.set_angle(tracker.get_value() + index)
+            )
+        self.add(*vectors)
+        self.play(tracker.animate.set_value(1), run_time=1)
+        self.play(tracker.animate.set_value(2), run_time=1)
+
+
+def test_static_layer_is_captured_once_per_play_and_never_uploaded(calls, tmp_path):
+    with tempconfig(
+        {
+            "renderer": "vulkan",
+            "frame_rate": 10,
+            "pixel_width": 160,
+            "pixel_height": 90,
+            "media_dir": str(tmp_path),
+            "disable_caching": True,
+        }
+    ):
+        _Moving().render()
+    frames = calls["commit_into"]
+    assert frames >= 20
+    assert calls["capture_static_layer"] == 2
+    assert calls["load_pixels"] == 0
+    assert calls["restore_static_layer"] >= frames
+    # Paths go through one native call per VMobject, never per point.
+    assert calls["set_cubic_path"] > 0
+    assert calls["move_to"] == calls["curve_to"] == 0
+
+
+class _OpRecorder:
+    def __init__(self) -> None:
+        self.ops: list[tuple] = []
+
+    def new_path(self):
+        self.ops.clear()
+
+    def new_sub_path(self):
+        pass
+
+    def move_to(self, x, y):
+        self.ops.append(("M", x, y))
+
+    def curve_to(self, *coords):
+        self.ops.append(("C", *coords))
+
+    def close_path(self):
+        self.ops.append(("Z",))
+
+    def set_cubic_path(self, points, subpaths):
+        self.ops.clear()
+        for start, end, closed in subpaths:
+            self.ops.append(("M", points[start, 0], points[start, 1]))
+            for index in range(start, end - 3, 4):
+                handles = points[index + 1 : index + 4, :2].ravel()
+                self.ops.append(("C", *handles))
+            if closed:
+                self.ops.append(("Z",))
+
+
+@pytest.mark.parametrize(
+    "mobject",
+    [Circle(), Square(), Vector([1, 2, 0]), Circle().pointwise_become_partial(Circle(), 0.1, 0.6)],
+)
+def test_batched_path_matches_cairo_path(mobject):
+    from manim.renderer.cairo.camera import Camera
+
+    camera = Camera()
+    for vmobject in mobject.family_members_with_points():
+        cairo_ops, skia_ops = _OpRecorder(), _OpRecorder()
+        cairo_context = object.__new__(_CairoDrawingContext)
+        skia_context = object.__new__(SkiaDrawingContext)
+        cairo_context.camera = skia_context.camera = camera
+        _CairoDrawingContext._set_cairo_context_path(cairo_context, cairo_ops, vmobject)
+        SkiaDrawingContext._set_cairo_context_path(skia_context, skia_ops, vmobject)
+        assert len(cairo_ops.ops) == len(skia_ops.ops)
+        for a, b in zip(cairo_ops.ops, skia_ops.ops):
+            assert a[0] == b[0]
+            np.testing.assert_allclose(a[1:], b[1:])

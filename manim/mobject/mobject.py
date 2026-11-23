@@ -13,6 +13,7 @@ import operator as op
 import random
 import types
 import warnings
+import weakref
 from collections.abc import Callable, Iterable, Iterator, MutableSet, Sequence
 from contextlib import suppress
 from functools import partialmethod, reduce
@@ -71,6 +72,24 @@ if TYPE_CHECKING:
 _TimeBasedUpdater: TypeAlias = Callable[["Mobject", float], object]
 _NonTimeBasedUpdater: TypeAlias = Callable[["Mobject"], object]
 _Updater: TypeAlias = _NonTimeBasedUpdater | _TimeBasedUpdater
+
+
+_UPDATER_USES_DT: weakref.WeakKeyDictionary[Callable[..., object], bool] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _updater_uses_dt(updater: Callable[..., object]) -> bool:
+    """Whether ``updater`` takes ``dt``; cached because inspect.signature is slow."""
+    try:
+        return _UPDATER_USES_DT[updater]
+    except (KeyError, TypeError):
+        pass
+    uses_dt = "dt" in inspect.signature(updater).parameters
+    with suppress(TypeError):
+        _UPDATER_USES_DT[updater] = uses_dt
+    return uses_dt
+
 
 
 class Mobject:
@@ -1103,7 +1122,7 @@ class Mobject:
         if self.updating_suspended:
             return self
         for updater in self.updaters:
-            if "dt" in inspect.signature(updater).parameters:
+            if _updater_uses_dt(updater):
                 time_based_updater = cast(_TimeBasedUpdater, updater)
                 time_based_updater(self, dt)
             else:
@@ -1132,7 +1151,7 @@ class Mobject:
         """
         rv: list[_TimeBasedUpdater] = []
         for updater in self.updaters:
-            if "dt" in inspect.signature(updater).parameters:
+            if _updater_uses_dt(updater):
                 time_based_updater = cast(_TimeBasedUpdater, updater)
                 rv.append(time_based_updater)
         return rv
@@ -1152,7 +1171,7 @@ class Mobject:
 
         """
         return any(
-            "dt" in inspect.signature(updater).parameters for updater in self.updaters
+            _updater_uses_dt(updater) for updater in self.updaters
         )
 
     def get_updaters(self) -> list[_Updater]:

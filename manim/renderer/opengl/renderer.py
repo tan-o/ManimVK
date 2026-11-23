@@ -932,6 +932,9 @@ class OpenGLRenderer(_RendererExecutionView):
     ) -> None:
         self._ensure_not_closed()
 
+    def discard_static_frame(self) -> None:
+        """OpenGL redraws every mobject each frame and keeps no static frame."""
+
     def get_frame_buffer_object(
         self,
         context: moderngl.Context,

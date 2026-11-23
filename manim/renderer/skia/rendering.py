@@ -74,6 +74,32 @@ class SkiaDrawingContext(_CairoDrawingContext):
             ]
             self.target.draw_sksl_quad(mobject.source, mobject.uniforms, quad)
 
+    def _set_cairo_context_path(self, context, vmobject) -> None:
+        """Send a VMobject's whole path to Skia in one native call.
+
+        Same subpaths and closing rule as the Cairo version, which issues one
+        call per point.
+        """
+        nppcc = vmobject.n_points_per_cubic_curve
+        if nppcc != 4:
+            # The native call consumes cubic Beziers only.
+            super()._set_cairo_context_path(context, vmobject)
+            return
+        points = self.camera.transform_points_pre_display(vmobject, vmobject.points)
+        subpaths: list[tuple[int, int, bool]] = []
+        if len(points):
+            for start, end in vmobject.get_subpath_split_indices_from_points(
+                points, n_dims=2
+            ):
+                start, end = int(start), int(end)
+                if end - start < nppcc:
+                    continue
+                closed = bool(
+                    vmobject.consider_points_equals_2d(points[start], points[end - 1])
+                )
+                subpaths.append((start, end, closed))
+        context.set_cubic_path(np.ascontiguousarray(points, dtype=np.float64), subpaths)
+
     def _set_cairo_context_color(self, context, rgbas, vmobject) -> None:
         if len(rgbas) == 1:
             # Manim stores straight RGBA, matching Skia's set_source_rgba.
@@ -127,9 +153,7 @@ class SkiaDrawingContext(_CairoDrawingContext):
         context = self.target.get_context(self.camera)
         for vmobject in vmobjects:
             self._set_cairo_context_path(context, vmobject)
-            self.target.fill_path_with_image(
-                np.ascontiguousarray(background, dtype=np.uint8).tobytes(),
-            )
+            self.target.fill_path_with_image(background)
             self._apply_stroke(context, vmobject)
 
     def _display_point_cloud_mobjects(self, pmobjects) -> None:

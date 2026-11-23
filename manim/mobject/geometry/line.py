@@ -643,6 +643,9 @@ class Arrow(Line):
             self._set_stroke_width_from_length()
             return self
 
+        if self._scale_with_rigid_tip(factor, kwargs):
+            return self
+
         has_tip = self.has_tip()
         has_start_tip = self.has_start_tip()
         if has_tip or has_start_tip:
@@ -658,6 +661,54 @@ class Arrow(Line):
             # error: Argument "tip" to "add_tip" of "TipableVMobject" has incompatible type "VMobject"; expected "ArrowTip | None"  [arg-type]
             self.add_tip(tip=cast(ArrowTip, old_tips[1]), at_start=True)
         return self
+
+    def _scale_with_rigid_tip(self, factor: float, kwargs: dict[str, Any]) -> bool:
+        """Scale a straight arrow with one end tip without rebuilding the tip.
+
+        Equivalent to the general path below (pop the tip, scale the shaft
+        about its centre, reattach the same tip), which only translates the
+        tip because scaling by a positive factor keeps the direction. Skipping
+        ``pop_tips``/``add_tip`` avoids repeated arc-length sampling of the tip.
+        Returns ``False`` when the general path is required.
+        """
+        if (
+            kwargs
+            or config.renderer == RendererType.OPENGL
+            or factor <= 0
+            or self.path_arc != 0
+            or self.has_start_tip()
+            or not self.has_tip()
+            or not hasattr(self, "_init_positioning_axis")
+            or len(self.submobjects) != 1
+        ):
+            return False
+        points = self.points
+        tip = self.tip
+        start = points[0]
+        base = points[-1]
+        end = tip.points[0]
+        shaft = base - start
+        shaft_sq = float(np.dot(shaft, shaft))
+        if shaft_sq == 0:
+            return False
+        center = (start + end) / 2
+        new_start = center + factor * (start - center)
+        offset = center + factor * (end - center) - end
+        new_base = base + offset
+        fractions = (points - start) @ shaft / shaft_sq
+        self.points = new_start + np.outer(fractions, new_base - new_start)
+        tip.shift(offset)
+        # The general path derives the width inside reset_endpoints_based_on_tip,
+        # i.e. from the shaft without the tip.
+        length = float(np.linalg.norm(new_base - new_start))
+        self.set_stroke(
+            width=min(
+                self.initial_stroke_width,
+                self.max_stroke_width_to_length_ratio * length,
+            ),
+            family=False,
+        )
+        return True
 
     def get_normal_vector(self) -> Vector3D:
         """Returns the normal of a vector.

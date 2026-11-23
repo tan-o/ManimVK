@@ -22,9 +22,8 @@ class SkiaRenderTarget(_CairoRenderTarget):
     """A Cairo-compatible target whose vector drawing is done by Skia/Ganesh.
 
     The public surface mirrors :class:`_CairoRenderTarget` so the existing
-    classic-family drawing code can stay unchanged.  Images, point clouds and
-    background-masked vector objects are drawn directly by Skia's GPU pipeline;
-    only the composed multi-camera sub-targets still cross the CPU boundary.
+    classic-family drawing code can stay unchanged.  Everything is drawn on the
+    GPU; ``pixels`` is only filled when a caller reads the frame back.
     """
 
     def __init__(
@@ -41,7 +40,7 @@ class SkiaRenderTarget(_CairoRenderTarget):
             settings.pixel_height,
         )
         self._gpu_dirty = False
-        self._cpu_dirty = False
+        self._background_pending = False
         self._last_readback: RGBAPixelArray | None = None
         self._native.clear_rgba(0.0, 0.0, 0.0, 0.0)
         self._owner_thread = threading.get_ident()
@@ -62,39 +61,83 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._ensure_open()
         if self._last_readback is not None:
             return self._last_readback
+        self._materialize_background()
         return self._pixels
 
-    def _upload_if_cpu_dirty(self) -> None:
-        if self._cpu_dirty:
-            self._native.load_pixels(self._pixels.tobytes())
-            self._cpu_dirty = False
-
     def reset(self, camera: Camera) -> None:
-        super().reset(camera)
-        color = camera.background_color.to_rgba_with_alpha(camera.background_opacity)
-        self._native.clear_rgba(*color)
-        if camera.background_image is not None:
-            self._native.load_pixels(self._pixels.tobytes())
+        """Clear to the camera background on the GPU.
+
+        ``pixels`` is filled from the background only if this frame is read
+        back with nothing drawn on it, so a cleared frame stays exact without
+        a per-frame CPU copy.
+        """
+        self._ensure_open()
+        key = self._camera_background_key(camera)
+        if key != self._background_key:
+            self._background = self._load_background(camera)
+            self._background_key = key
+            if camera.background_image is not None:
+                self._native.set_background_layer(
+                    np.ascontiguousarray(self._background, dtype=np.uint8)
+                )
+        if camera.background_image is None:
+            color = camera.background_color.to_rgba_with_alpha(camera.background_opacity)
+            self._native.clear_rgba(*color)
+        else:
+            self._native.draw_background_layer()
         self._gpu_dirty = False
-        self._cpu_dirty = False
         self._last_readback = None
+        self._background_pending = True
+
+    def _materialize_background(self) -> None:
+        """Fill ``pixels`` with the background of a frame nothing was drawn on."""
+        if self._background_pending and not self._gpu_dirty:
+            np.copyto(self._pixels, self._background)
+            self._background_pending = False
 
     def clear(self) -> None:
-        # Drop the direct-read snapshot before the base implementation fills
-        # ``pixels``; otherwise it would fill the snapshot and leave _pixels
-        # untouched.
-        self._last_readback = None
-        super().clear()
+        self._ensure_open()
         self._native.clear_rgba(0.0, 0.0, 0.0, 0.0)
+        self._pixels.fill(0)
         self._gpu_dirty = False
-        self._cpu_dirty = False
+        self._last_readback = None
+        self._background_pending = False
 
     def set_pixels(self, pixels: RGBAPixelArray) -> None:
-        super().set_pixels(pixels)
-        self._native.load_pixels(self._pixels.tobytes())
+        self._ensure_open()
+        if pixels.shape != self._pixels.shape or pixels.dtype != np.uint8:
+            raise ValueError(
+                f"Skia target pixels must be uint8 with shape {self._pixels.shape}; "
+                f"got {pixels.dtype} {pixels.shape}."
+            )
+        np.copyto(self._pixels, pixels)
+        self._native.load_pixels(self._pixels)
         self._gpu_dirty = False
-        self._cpu_dirty = False
         self._last_readback = None
+        self._background_pending = False
+
+    def _mark_gpu_written(self) -> None:
+        """The GPU surface changed; ``pixels`` is stale until the next read."""
+        self._gpu_dirty = True
+        self._last_readback = None
+        self._background_pending = False
+
+    def capture_static_layer(self) -> None:
+        """Keep the current surface on the GPU as this play's static background."""
+        self._ensure_open()
+        self._native.capture_static_layer()
+
+    def restore_static_layer(self) -> bool:
+        """Start a frame from the static background; False if none is captured."""
+        self._ensure_open()
+        if not self._native.restore_static_layer():
+            return False
+        self._mark_gpu_written()
+        return True
+
+    def clear_static_layer(self) -> None:
+        if self._native is not None:
+            self._native.clear_static_layer()
 
     def get_scratch_target(self) -> SkiaRenderTarget:
         self._ensure_open()
@@ -108,7 +151,6 @@ class SkiaRenderTarget(_CairoRenderTarget):
 
     def get_context(self, camera: Camera):
         self._ensure_open()
-        self._upload_if_cpu_dirty()
         center = camera.get_view_transform_center()
         settings = self.settings
         sx = settings.pixel_width / camera.frame_width
@@ -118,18 +160,8 @@ class SkiaRenderTarget(_CairoRenderTarget):
         # exactly pixel_height / 2.
         ty = settings.pixel_height / 2 + center[1] * sy
         self._native.set_matrix(sx, sy, tx, ty)
-        self._gpu_dirty = True
+        self._mark_gpu_written()
         return self._native
-
-    def mark_cpu_dirty(self) -> None:
-        """Tell the target that point-cloud/image code changed ``pixels``."""
-        if self._last_readback is not None:
-            # CPU compositing may have mutated the snapshot returned by
-            # read_pixels(); bring that frame back into the reusable buffer
-            # before the next GPU upload.
-            np.copyto(self._pixels, self._last_readback)
-            self._last_readback = None
-        self._cpu_dirty = True
 
     def draw_vertices(self, positions, colors) -> None:
         """Draw pre-projected triangles with per-vertex RGBA colours."""
@@ -146,7 +178,7 @@ class SkiaRenderTarget(_CairoRenderTarget):
                 for r, g, b, a in colors
             ],
         )
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def set_anti_alias(self, enabled: bool) -> None:
         """Toggle edge antialiasing for the next vector batch."""
@@ -157,32 +189,39 @@ class SkiaRenderTarget(_CairoRenderTarget):
         """Evaluate the full-screen HSB shader on the Skia Vulkan backend."""
         self._ensure_open()
         self._native.draw_hsb_quad(float(time))
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def draw_image_quad(self, pixels, width: int, height: int, quad, alpha: float) -> None:
         """Draw an RGBA image into a device-space quad on the GPU."""
         self._ensure_open()
         self._native.draw_image_quad(pixels, int(width), int(height), quad, float(alpha))
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def draw_target_quad(self, source: SkiaRenderTarget, quad, alpha: float) -> None:
         """Composite another target's GPU surface without a CPU readback."""
         self._ensure_open()
         source._ensure_open()
         self._native.draw_target_quad(source._native, quad, float(alpha))
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def fill_path_with_image(self, pixels) -> None:
-        """Fill the current path with a full-frame background image."""
+        """Fill the current path with a full-frame background image.
+
+        Read-only arrays are image files cached for the renderer's lifetime
+        (see ``_ImageFiles``), so their identity keys the GPU upload; other
+        arrays may change and are uploaded on each call.
+        """
         self._ensure_open()
-        self._native.fill_path_with_image(pixels)
-        self._gpu_dirty = True
+        pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
+        key = None if pixels.flags.writeable else id(pixels)
+        self._native.fill_path_with_image(pixels, key)
+        self._mark_gpu_written()
 
     def draw_point_pixels(self, points, half_size: float) -> None:
         """Draw point-cloud samples in device pixels without CPU compositing."""
         self._ensure_open()
         self._native.draw_point_pixels(points, float(half_size))
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def draw_sksl_quad(self, source: str, uniforms: dict[str, object], quad) -> None:
         """Compile and draw a user SkSL effect over a device-space quad."""
@@ -194,23 +233,23 @@ class SkiaRenderTarget(_CairoRenderTarget):
             else:
                 normalized.append((str(name), [float(v) for v in value]))
         self._native.draw_sksl_quad(source, normalized, quad)
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def draw_design3_quad(self, time: float) -> None:
         """Evaluate Manim's raymarched ``design_3`` shader on Vulkan."""
         self._ensure_open()
         self._native.draw_design3_quad(float(time))
-        self._gpu_dirty = True
+        self._mark_gpu_written()
 
     def commit(self) -> None:
         """Bring the GPU surface content back into ``pixels``."""
+        self._materialize_background()
         if self._gpu_dirty:
             self._pixels[:, :] = np.frombuffer(
                 bytes(self._native.commit()),
                 dtype=np.uint8,
             ).reshape(self._pixels.shape)
             self._gpu_dirty = False
-            self._cpu_dirty = False
             self._last_readback = None
         elif self._last_readback is not None:
             # A direct read only populated the returned snapshot.  Keep the
@@ -231,11 +270,11 @@ class SkiaRenderTarget(_CairoRenderTarget):
             frame = np.empty_like(self._pixels)
             self._native.commit_into(frame)
             self._gpu_dirty = False
-            self._cpu_dirty = False
             self._last_readback = frame
             return frame
         if self._last_readback is not None:
             return self._last_readback.copy()
+        self._materialize_background()
         return self._pixels.copy()
 
     def close(self) -> None:
