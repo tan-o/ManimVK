@@ -155,19 +155,25 @@ class SkiaRenderTarget(_CairoRenderTarget):
         settings = self.settings
         sx = settings.pixel_width / camera.frame_width
         sy = -settings.pixel_height / camera.frame_height
+        # x' = sx * x + tx and y' = sy * y + ty (sy is negative: Skia is y-down);
+        # both map the frame center to the middle of the target.
         tx = settings.pixel_width / 2 - center[0] * sx
-        # y' = sy * (y - center_y) + pixel_height / 2.  sy is negative to flip
-        # Manim's y-up coordinates; the center term must therefore be
-        # subtracted, not added.
         ty = settings.pixel_height / 2 - center[1] * sy
         self._native.set_matrix(sx, sy, tx, ty)
         self._mark_gpu_written()
         return self._native
 
-    def draw_image_quad(self, pixels, width: int, height: int, quad, alpha: float) -> None:
-        """Draw an RGBA image into a device-space quad on the GPU."""
+    def draw_image_quad(
+        self, pixels, width: int, height: int, quad, alpha: float, sampling: int = 2
+    ) -> None:
+        """Draw an RGBA image into a device-space quad on the GPU.
+
+        ``sampling`` is 0 (nearest), 1 (bilinear) or 2 (bicubic).
+        """
         self._ensure_open()
-        self._native.draw_image_quad(pixels, int(width), int(height), quad, float(alpha))
+        self._native.draw_image_quad(
+            pixels, int(width), int(height), quad, float(alpha), int(sampling)
+        )
         self._mark_gpu_written()
 
     def draw_target_quad(self, source: SkiaRenderTarget, quad, alpha: float) -> None:
@@ -177,8 +183,9 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._native.draw_target_quad(source._native, quad, float(alpha))
         self._mark_gpu_written()
 
-    def fill_path_with_image(self, pixels) -> None:
-        """Fill the current path with a full-frame background image.
+    def set_source_image(self, pixels, rgba) -> None:
+        """Make a full-frame background image, tinted by ``rgba``, the source
+        of the next fills and strokes.
 
         Read-only arrays are image files cached for the renderer's lifetime
         (see ``_ImageFiles``), so their identity keys the GPU upload; other
@@ -187,7 +194,32 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._ensure_open()
         pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
         key = None if pixels.flags.writeable else id(pixels)
-        self._native.fill_path_with_image(pixels, key)
+        self._native.set_source_image(pixels, *(float(c) for c in rgba), key)
+
+    def draw_textured_mesh(
+        self, key: int, texture, positions, uvs, colors, alpha: float, occlude=None
+    ) -> None:
+        """Draw textured triangles, in scene coordinates, through the canvas matrix.
+
+        ``texture`` is a read-only RGBA array uploaded once per ``key``;
+        ``positions`` and ``uvs`` (in texture pixels) are float32 ``(n, 2)``
+        and ``colors`` float32 ``(n, 4)``, three rows per triangle.  The
+        triangles blend in order inside one layer drawn with ``alpha``.  With
+        ``occlude``, an RGBA colour, the triangles first replace what is
+        under them with that colour.
+        """
+        self._ensure_open()
+        self._native.draw_textured_mesh(
+            key,
+            texture,
+            texture.shape[1],
+            texture.shape[0],
+            positions,
+            uvs,
+            colors,
+            float(alpha),
+            occlude,
+        )
         self._mark_gpu_written()
 
     def draw_point_pixels(self, points, half_size: float) -> None:

@@ -98,6 +98,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
         # 1. Frames as evaluation draws them.
         with tempconfig({**settings, "format": "none"}):
             frames = []
+            seed()
             times = np.arange(0.0, MAX_SAMPLED_TIME, SAMPLE_STEP).tolist()
             seed()
             Manager(scene_class()).evaluate(frame_times=times, on_frame=frames.append)
@@ -161,7 +162,7 @@ def main() -> None:
         try:
             result = subprocess.run(
                 command, cwd=cwd_for(entry), capture_output=True, text=True,
-                timeout=args.timeout, env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                timeout=args.timeout, env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONHASHSEED": "0"},
             )
             if not (target / "status.json").exists():
                 target.mkdir(parents=True, exist_ok=True)

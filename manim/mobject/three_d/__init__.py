@@ -8,5 +8,6 @@ Modules
 
     ~polyhedra
     ~three_d_utils
+    ~mesh_surface
     ~three_dimensions
 """

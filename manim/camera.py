@@ -211,6 +211,18 @@ class Camera:
                 mobjects = list_difference_update(mobjects, all_excluded)
         return list(mobjects)
 
+    def get_draw_items(
+        self,
+        mobjects: list[Mobject],
+        roots: dict[int, int] | None = None,
+    ) -> list[tuple[Mobject, np.ndarray | None]]:
+        """Pair each mobject from :meth:`get_mobjects_to_display` with the
+        indices of its depth pieces to draw; ``None`` draws it whole.
+
+        A flat camera draws every mobject whole, in display order.
+        """
+        return [(mobject, None) for mobject in mobjects]
+
     def is_in_frame(self, mobject: Mobject) -> bool:
         """Whether ``mobject`` intersects the camera frame's bounds."""
         center = self.frame_center
@@ -379,21 +391,6 @@ class Camera:
         factor[(focal_distance - zs) < 0] = 10**6
         points[:, :2] *= (factor * zoom)[:, None]
         return points
-
-    @property
-    def formatted_view_matrix(self) -> np.ndarray:
-        """A 4x4 matrix for shader-compatible callers.
-
-        The Skia/Vulkan mesh adapter consumes projected vertices directly; this
-        matrix is exposed so the public ``Mesh``/``Shader`` API can still be
-        constructed without an OpenGL camera.
-        """
-        return np.eye(4)
-
-    @property
-    def projection_matrix(self) -> np.ndarray:
-        """A 4x4 projection matrix for shader-compatible callers."""
-        return np.eye(4)
 
     def set_euler_angles(self, theta=None, phi=None, gamma=None, **kwargs: Any) -> Self:
         """Accept the classic OpenGL camera's Euler-angle API.
@@ -656,14 +653,106 @@ class ThreeDCamera(Camera):
         rot_matrix = self.get_rotation_matrix()
 
         def z_key(mob: Mobject) -> float:
-            if not (hasattr(mob, "shade_in_3d") and mob.shade_in_3d):
+            if not (mob.depth_test or getattr(mob, "shade_in_3d", False)):
                 return np.inf  # type: ignore[no-any-return]
+            if mob.depth_test and len(mob.points):
+                # Depth-tested mobjects can hold many thousands of points;
+                # their mean is cheaper than a bounding box.
+                return float(np.dot(mob.points.mean(axis=0), rot_matrix[2]))
             # Assign a number to a three dimensional mobjects
             # based on how close it is to the camera
             distance: float = np.dot(mob.get_z_index_reference_point(), rot_matrix.T)[2]
             return distance
 
         return sorted(mobjects, key=z_key)
+
+    #: Number of depth slices used when depth pieces are present; see
+    #: :meth:`get_draw_items`.
+    depth_slices = 64
+
+    def get_draw_items(
+        self,
+        mobjects: list[Mobject],
+        roots: dict[int, int] | None = None,
+    ) -> list[tuple[Mobject, np.ndarray | None]]:
+        """Order depth pieces and 3D mobjects back to front.
+
+        Without depth pieces (see :meth:`.Mobject.get_depth_pieces`) this is
+        the order of :meth:`get_mobjects_to_display`.  With them, every piece
+        and every ``shade_in_3d`` or depth-tested mobject is put in one of
+        :attr:`depth_slices` slices of the frame's depth range.  Slices draw far
+        to near; inside a slice, top-level scene mobjects (``roots`` maps
+        ``id(mobject)`` to its top-level index) draw in scene order, and the
+        parts of one top-level mobject far to near.  Consecutive pieces of one
+        mobject then form a single draw, so a field of thousands of arrows
+        costs a few dozen draws instead of one per arrow.  Mobjects that are
+        not 3D are drawn last, in display order.
+        """
+        pieces: dict[int, np.ndarray] = {}
+        for index, mobject in enumerate(mobjects):
+            if mobject.depth_test:
+                centers = mobject.get_depth_pieces()
+                if centers is not None and len(centers):
+                    pieces[index] = np.asarray(centers, dtype=float)
+        if not pieces:
+            return [(mobject, None) for mobject in mobjects]
+
+        depth_axis = self.get_rotation_matrix()[2]
+        roots = roots or {}
+        owners: list[np.ndarray] = []
+        parts: list[np.ndarray] = []
+        depths: list[np.ndarray] = []
+        groups: list[np.ndarray] = []
+        for index, mobject in enumerate(mobjects):
+            root = roots.get(id(mobject), index)
+            if index in pieces:
+                count = len(pieces[index])
+                piece_depths = pieces[index] @ depth_axis
+                if piece_depths.ndim == 2:
+                    # Pieces given by their corners are as far as their
+                    # farthest corner: a surface triangle is drawn before what
+                    # lies on top of it.
+                    piece_depths = piece_depths.min(axis=1)
+                owners.append(np.full(count, index))
+                parts.append(np.arange(count))
+                depths.append(piece_depths)
+                groups.append(np.full(count, root))
+                continue
+            is_3d = mobject.depth_test or getattr(mobject, "shade_in_3d", False)
+            owners.append(np.array([index]))
+            parts.append(np.array([-1]))
+            depths.append(
+                np.array([np.dot(mobject.get_z_index_reference_point(), depth_axis)])
+                if is_3d
+                else np.array([np.inf])
+            )
+            # Flat mobjects keep their display order among themselves.
+            groups.append(np.array([root if is_3d else index]))
+        owner = np.concatenate(owners)
+        part = np.concatenate(parts)
+        depth = np.concatenate(depths)
+        group = np.concatenate(groups)
+
+        finite = np.isfinite(depth)
+        slices = np.full(len(depth), self.depth_slices)
+        if finite.any():
+            low, high = depth[finite].min(), depth[finite].max()
+            span = max(high - low, 1e-9)
+            slices[finite] = np.minimum(
+                ((depth[finite] - low) / span * self.depth_slices).astype(int),
+                self.depth_slices - 1,
+            )
+        sort_depth = np.where(finite, depth, 0.0)
+        order = np.lexsort((sort_depth, group, slices))
+        owner, part = owner[order], part[order]
+
+        items: list[tuple[Mobject, np.ndarray | None]] = []
+        starts = np.flatnonzero(np.diff(owner, prepend=-1) != 0)
+        ends = np.append(starts[1:], len(owner))
+        for start, end in zip(starts, ends):
+            index = int(owner[start])
+            items.append((mobjects[index], part[start:end] if index in pieces else None))
+        return items
 
     def get_phi(self) -> float:
         """Returns the Polar angle (the angle off Z_AXIS) phi.

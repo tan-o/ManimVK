@@ -13,18 +13,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ash::vk;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use skia_safe::{
-    AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, CubicResampler, Data, FilterMode,
-    Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
-    RuntimeEffect, SamplingOptions, TileMode, M44, gpu,
-};
-use skia_safe::runtime_effect::RuntimeShaderBuilder;
-use skia_safe::vertices::{VertexMode, Vertices};
 use skia_safe::gradient::{Colors as GradientColors, Gradient, Interpolation};
 use skia_safe::paint::{Cap, Join, Style};
+use skia_safe::runtime_effect::RuntimeShaderBuilder;
+use skia_safe::vertices::{VertexMode, Vertices};
+use skia_safe::{
+    gpu, AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, CubicResampler, Data, FilterMode,
+    Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
+    RuntimeEffect, SamplingOptions, TileMode, M44,
+};
 
 struct DeviceInner {
     entry: ash::Entry,
@@ -85,11 +85,13 @@ impl Device {
         let mut layer_names: Vec<CString> = Vec::new();
         if validation {
             layer_names.push(
-                CString::new("VK_LAYER_KHRONOS_validation")
-                    .map_err(|_| PyValueError::new_err("validation layer name contains a NUL byte"))?,
+                CString::new("VK_LAYER_KHRONOS_validation").map_err(|_| {
+                    PyValueError::new_err("validation layer name contains a NUL byte")
+                })?,
             );
         }
-        let layer_refs: Vec<*const std::ffi::c_char> = layer_names.iter().map(|name| name.as_ptr()).collect();
+        let layer_refs: Vec<*const std::ffi::c_char> =
+            layer_names.iter().map(|name| name.as_ptr()).collect();
         let instance_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layer_refs);
@@ -112,11 +114,16 @@ impl Device {
         for physical_device in physical_devices {
             let properties = unsafe { instance.get_physical_device_properties(physical_device) };
             let name = String::from_utf8_lossy(
-                &properties.device_name.iter().map(|&c| c as u8).collect::<Vec<u8>>(),
+                &properties
+                    .device_name
+                    .iter()
+                    .map(|&c| c as u8)
+                    .collect::<Vec<u8>>(),
             )
             .trim_end_matches('\0')
             .to_string();
-            let families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+            let families =
+                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
             let Some((index, _)) = families
                 .iter()
                 .enumerate()
@@ -153,7 +160,11 @@ impl Device {
         })?;
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let device_name = String::from_utf8_lossy(
-            &properties.device_name.iter().map(|&c| c as u8).collect::<Vec<u8>>(),
+            &properties
+                .device_name
+                .iter()
+                .map(|&c| c as u8)
+                .collect::<Vec<u8>>(),
         )
         .trim_end_matches('\0')
         .to_string();
@@ -224,7 +235,6 @@ impl Device {
     }
 }
 
-
 fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
     use ash::vk::Handle;
     let inner_for_proc = inner.clone();
@@ -249,28 +259,24 @@ fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
     Ok(Rc::new(GpuShared { backend, context }))
 }
 
-
-fn skia_get_proc(
-    inner: &DeviceInner,
-    of: gpu::vk::GetProcOf,
-) -> *const std::ffi::c_void {
+fn skia_get_proc(inner: &DeviceInner, of: gpu::vk::GetProcOf) -> *const std::ffi::c_void {
     use ash::vk::Handle;
     unsafe {
         match of {
             gpu::vk::GetProcOf::Instance(instance, name) => {
-                match inner.entry.get_instance_proc_addr(
-                    vk::Instance::from_raw(instance as _),
-                    name,
-                ) {
+                match inner
+                    .entry
+                    .get_instance_proc_addr(vk::Instance::from_raw(instance as _), name)
+                {
                     Some(function) => function as *const std::ffi::c_void,
                     None => std::ptr::null(),
                 }
             }
             gpu::vk::GetProcOf::Device(device, name) => {
-                match inner.instance.get_device_proc_addr(
-                    vk::Device::from_raw(device as _),
-                    name,
-                ) {
+                match inner
+                    .instance
+                    .get_device_proc_addr(vk::Device::from_raw(device as _), name)
+                {
                     Some(function) => function as *const std::ffi::c_void,
                     None => std::ptr::null(),
                 }
@@ -302,15 +308,12 @@ struct SkiaTarget {
     /// Background-image fills keyed by the caller's cache key (the id of a
     /// cached, read-only image-file array), so each file is uploaded once.
     fill_images: HashMap<u64, Image>,
+    /// Mipmapped mesh textures keyed by the caller's cache key.
+    mesh_images: HashMap<u64, Image>,
 }
 
 impl SkiaTarget {
-    fn new(
-        inner: Arc<DeviceInner>,
-        gpu: Rc<GpuShared>,
-        width: u32,
-        height: u32,
-    ) -> PyResult<Self> {
+    fn new(inner: Arc<DeviceInner>, gpu: Rc<GpuShared>, width: u32, height: u32) -> PyResult<Self> {
         // Cloning a DirectContext only bumps Skia's reference count; all
         // targets share the one Ganesh context created for this Device.
         let mut context = gpu.context.clone();
@@ -352,6 +355,7 @@ impl SkiaTarget {
             static_layer: None,
             background_layer: None,
             fill_images: HashMap::new(),
+            mesh_images: HashMap::new(),
         })
     }
 
@@ -374,11 +378,7 @@ impl SkiaTarget {
     /// Build an RGBA8 unpremultiplied raster image from a C-contiguous buffer.
     /// Drawing it on the Ganesh canvas uploads it once; Skia caches the texture
     /// for as long as the returned `Image` is alive.
-    fn raster_image(
-        pixels: &Bound<PyAny>,
-        width: u32,
-        height: u32,
-    ) -> PyResult<Image> {
+    fn raster_image(pixels: &Bound<PyAny>, width: u32, height: u32) -> PyResult<Image> {
         let buffer = PyBuffer::<u8>::get(pixels)
             .map_err(|error| PyValueError::new_err(format!("pixel buffer: {error}")))?;
         let expected = (width * height * 4) as usize;
@@ -402,6 +402,30 @@ impl SkiaTarget {
         );
         Image::from_raster_data(&info, Data::new_copy(bytes), (width * 4) as usize)
             .ok_or_else(|| PyRuntimeError::new_err("Skia Image::from_raster_data failed"))
+    }
+
+    /// Image sampling for `ImageMobject.resampling_algorithm`: 0 nearest,
+    /// 1 bilinear, 2 bicubic (Catmull-Rom, as PIL's bicubic).
+    fn image_sampling(sampling: u8) -> SamplingOptions {
+        match sampling {
+            0 => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+            1 => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+            _ => SamplingOptions::from(CubicResampler::catmull_rom()),
+        }
+    }
+
+    /// Copy a C-contiguous float32 buffer of `width` columns into a Vec.
+    fn f32_rows(values: &Bound<PyAny>, width: usize, what: &str) -> PyResult<Vec<f32>> {
+        let buffer = PyBuffer::<f32>::get(values)
+            .map_err(|error| PyValueError::new_err(format!("{what}: {error}")))?;
+        if buffer.item_count() % width != 0 {
+            return Err(PyValueError::new_err(format!(
+                "{what} must have {width} columns"
+            )));
+        }
+        buffer
+            .to_vec(values.py())
+            .map_err(|error| PyValueError::new_err(format!("{what}: {error}")))
     }
 }
 
@@ -432,10 +456,7 @@ impl SkiaTarget {
     fn set_matrix(&mut self, sx: f32, sy: f32, tx: f32, ty: f32) {
         let mut matrix = M44::new_identity();
         matrix.set_row_major(&[
-            sx, 0.0, 0.0, tx,
-            0.0, sy, 0.0, ty,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            sx, 0.0, 0.0, tx, 0.0, sy, 0.0, ty, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
         self.matrix = matrix;
         self.matrix_sx = sx;
@@ -463,11 +484,8 @@ impl SkiaTarget {
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
-        self.path.cubic_to(
-            Point::new(x1, y1),
-            Point::new(x2, y2),
-            Point::new(x3, y3),
-        );
+        self.path
+            .cubic_to(Point::new(x1, y1), Point::new(x2, y2), Point::new(x3, y3));
     }
 
     fn close_path(&mut self) {
@@ -510,7 +528,8 @@ impl SkiaTarget {
             self.path.move_to(at(start));
             let mut index = start;
             while index + 4 <= end {
-                self.path.cubic_to(at(index + 1), at(index + 2), at(index + 3));
+                self.path
+                    .cubic_to(at(index + 1), at(index + 2), at(index + 3));
                 index += 4;
             }
             if closed {
@@ -560,7 +579,8 @@ impl SkiaTarget {
 
     fn set_source_rgba(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
         self.paint.set_shader(None);
-        self.paint.set_color4f(Color4f::new(red, green, blue, alpha), None);
+        self.paint
+            .set_color4f(Color4f::new(red, green, blue, alpha), None);
     }
 
     /// `stops` is a list of (offset, red, green, blue, alpha), with offset in 0..=1.
@@ -581,12 +601,8 @@ impl SkiaTarget {
             colors.push(Color4f::new(red, green, blue, alpha));
             positions.push(offset);
         }
-        let gradient_colors = GradientColors::new(
-            &colors,
-            Some(positions.as_slice()),
-            TileMode::Clamp,
-            None,
-        );
+        let gradient_colors =
+            GradientColors::new(&colors, Some(positions.as_slice()), TileMode::Clamp, None);
         let gradient = Gradient::new(gradient_colors, Interpolation::default());
         if let Some(shader) = skia_safe::gradient::shaders::linear_gradient(
             (Point::new(x0, y0), Point::new(x1, y1)),
@@ -632,6 +648,8 @@ impl SkiaTarget {
     /// Draw a raster RGBA image into an arbitrary device-space quad.  The
     /// image is sampled by Skia's GPU pipeline, so no host-side compositing is
     /// required for ``ImageMobject``.
+    /// `sampling` is 0 (nearest), 1 (bilinear) or 2 (bicubic).
+    #[allow(clippy::too_many_arguments)]
     fn draw_image_quad(
         &mut self,
         pixels: Vec<u8>,
@@ -639,6 +657,7 @@ impl SkiaTarget {
         image_height: u32,
         quad: Vec<(f32, f32)>,
         alpha: f32,
+        sampling: u8,
     ) -> PyResult<()> {
         if quad.len() != 4 {
             return Err(PyValueError::new_err("image quad needs four corners"));
@@ -647,7 +666,9 @@ impl SkiaTarget {
             || image_height == 0
             || pixels.len() != (image_width * image_height * 4) as usize
         {
-            return Err(PyValueError::new_err("image pixel buffer has the wrong size"));
+            return Err(PyValueError::new_err(
+                "image pixel buffer has the wrong size",
+            ));
         }
         let info = SkImageInfo::new(
             (image_width as i32, image_height as i32),
@@ -664,7 +685,7 @@ impl SkiaTarget {
         let shader = image
             .to_shader(
                 Some((TileMode::Clamp, TileMode::Clamp)),
-                SamplingOptions::from(CubicResampler::catmull_rom()),
+                Self::image_sampling(sampling),
                 None,
             )
             .ok_or_else(|| PyRuntimeError::new_err("Skia image shader failed"))?;
@@ -682,7 +703,9 @@ impl SkiaTarget {
             Point::new(quad[2].0, quad[2].1),
             Point::new(quad[3].0, quad[3].1),
         ];
-        let positions = [corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]];
+        let positions = [
+            corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
+        ];
         let tex_coords = [tex[0], tex[1], tex[2], tex[0], tex[2], tex[3]];
         let colors = [Color::WHITE; 6];
         let vertices = Vertices::new_copy(
@@ -739,7 +762,9 @@ impl SkiaTarget {
             Point::new(quad[2].0, quad[2].1),
             Point::new(quad[3].0, quad[3].1),
         ];
-        let positions = [corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]];
+        let positions = [
+            corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
+        ];
         let tex_coords = [tex[0], tex[1], tex[2], tex[0], tex[2], tex[3]];
         let colors = [Color::WHITE; 6];
         let vertices = Vertices::new_copy(
@@ -791,10 +816,8 @@ impl SkiaTarget {
         if !has_resolution {
             // Most full-screen effects declare u_resolution.  Ignoring the
             // error keeps shaders that do not need it valid.
-            let _ = builder.set_uniform_float(
-                "u_resolution",
-                &[self.width as f32, self.height as f32],
-            );
+            let _ =
+                builder.set_uniform_float("u_resolution", &[self.width as f32, self.height as f32]);
         }
         let shader = builder
             .make_shader(&Matrix::new_identity())
@@ -824,13 +847,22 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Fill the current path with a full-target background image.  The local
-    /// matrix maps the path's scene coordinates onto the image's device pixels,
-    /// keeping the mask and background on the GPU.
+    /// Use a full-target background image, tinted by an RGBA colour, as the
+    /// source of the following fills and strokes (Cairo's `set_source` with an
+    /// image pattern).  The local matrix maps the path's scene coordinates onto
+    /// the image's device pixels, keeping the mask and background on the GPU.
     /// `key` identifies an immutable pixel source (a cached image file) whose
     /// upload is kept; pass None for pixels that may change between calls.
-    #[pyo3(signature = (pixels, key=None))]
-    fn fill_path_with_image(&mut self, pixels: &Bound<PyAny>, key: Option<u64>) -> PyResult<()> {
+    #[pyo3(signature = (pixels, red, green, blue, alpha, key=None))]
+    fn set_source_image(
+        &mut self,
+        pixels: &Bound<PyAny>,
+        red: f32,
+        green: f32,
+        blue: f32,
+        alpha: f32,
+        key: Option<u64>,
+    ) -> PyResult<()> {
         let image = match key {
             Some(key) => match self.fill_images.get(&key) {
                 Some(image) => image.clone(),
@@ -842,6 +874,8 @@ impl SkiaTarget {
             },
             None => Self::raster_image(pixels, self.width, self.height)?,
         };
+        // The shader's local matrix takes image pixels to the path's scene
+        // coordinates: the inverse of the canvas matrix.
         let local = Matrix::new_all(
             self.matrix_sx,
             0.0,
@@ -852,32 +886,118 @@ impl SkiaTarget {
             0.0,
             0.0,
             1.0,
-        );
-        let shader = image
+        )
+        .invert()
+        .ok_or_else(|| PyValueError::new_err("the canvas matrix is not invertible"))?;
+        let image_shader = image
             .to_shader(
                 Some((TileMode::Clamp, TileMode::Clamp)),
                 SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
                 Some(&local),
             )
             .ok_or_else(|| PyRuntimeError::new_err("Skia background shader failed"))?;
-        let path = self.path.snapshot();
-        self.paint.set_shader(shader);
-        self.paint.set_style(Style::Fill);
+        let tint = skia_safe::shaders::color(Color4f::new(red, green, blue, alpha).to_color());
+        self.paint.set_shader(skia_safe::shaders::blend(
+            BlendMode::Modulate,
+            image_shader,
+            tint,
+        ));
         self.paint.set_color(Color::WHITE);
-        self.paint.set_alpha(255);
-        self.surface.canvas().draw_path(&path, &self.paint);
-        self.paint.set_shader(None);
+        Ok(())
+    }
+
+    /// Draw textured triangles through the current canvas matrix.
+    ///
+    /// `positions` and `uvs` are float32 (n, 2) arrays, `uvs` in texture
+    /// pixels, and `colors` float32 (n, 4), three rows per triangle.  Each
+    /// texel is multiplied by its vertex colour, and the triangles blend over
+    /// each other in order inside one layer composited with `alpha`.  With
+    /// `occlude` (an RGBA colour) the triangles first replace what is under
+    /// them with that colour.  The texture is uploaded with mipmaps once per
+    /// `key`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (key, pixels, image_width, image_height, positions, uvs, colors, alpha, occlude=None))]
+    fn draw_textured_mesh(
+        &mut self,
+        key: u64,
+        pixels: &Bound<PyAny>,
+        image_width: u32,
+        image_height: u32,
+        positions: &Bound<PyAny>,
+        uvs: &Bound<PyAny>,
+        colors: &Bound<PyAny>,
+        alpha: f32,
+        occlude: Option<(f32, f32, f32, f32)>,
+    ) -> PyResult<()> {
+        let image = match self.mesh_images.get(&key) {
+            Some(image) => image.clone(),
+            None => {
+                let raster = Self::raster_image(pixels, image_width, image_height)?;
+                let image = raster.with_default_mipmaps().unwrap_or(raster);
+                self.mesh_images.insert(key, image.clone());
+                image
+            }
+        };
+        let positions = Self::f32_rows(positions, 2, "mesh positions")?;
+        let uvs = Self::f32_rows(uvs, 2, "mesh uvs")?;
+        let colors = Self::f32_rows(colors, 4, "mesh colors")?;
+        let count = positions.len() / 2;
+        if uvs.len() != count * 2 || colors.len() != count * 4 || count % 3 != 0 {
+            return Err(PyValueError::new_err(
+                "mesh needs matching positions, uvs and colors, three per triangle",
+            ));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let points: Vec<Point> = positions
+            .chunks_exact(2)
+            .map(|p| Point::new(p[0], p[1]))
+            .collect();
+        let texs: Vec<Point> = uvs
+            .chunks_exact(2)
+            .map(|p| Point::new(p[0], p[1]))
+            .collect();
+        let vertex_colors: Vec<Color> = colors
+            .chunks_exact(4)
+            .map(|c| Color4f::new(c[0], c[1], c[2], c[3]).to_color())
+            .collect();
+        let vertices =
+            Vertices::new_copy(VertexMode::Triangles, &points, &texs, &vertex_colors, None);
+        let shader = image
+            .to_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+                None,
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("Skia mesh texture shader failed"))?;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_shader(shader);
+        let canvas = self.surface.canvas();
+        if let Some((red, green, blue, opacity)) = occlude {
+            let mut clear = Paint::default();
+            clear.set_shader(skia_safe::shaders::color(
+                Color4f::new(red, green, blue, opacity).to_color(),
+            ));
+            clear.set_blend_mode(BlendMode::Src);
+            canvas.draw_vertices(&vertices, BlendMode::Src, &clear);
+        }
+        let layered = alpha < 1.0;
+        if layered {
+            canvas.save_layer_alpha(None::<Rect>, (alpha.clamp(0.0, 1.0) * 255.0).round() as u32);
+        }
+        canvas.draw_vertices(&vertices, BlendMode::Modulate, &paint);
+        if layered {
+            canvas.restore();
+        }
         Ok(())
     }
 
     /// Draw point-cloud pixels directly into the target.  ``points`` contains
     /// (x, y, r, g, b, a) tuples in device pixel coordinates, and ``half_size``
     /// is the half extent of the square used for a point.
-    fn draw_point_pixels(
-        &mut self,
-        points: Vec<(f32, f32, u8, u8, u8, u8)>,
-        half_size: f32,
-    ) {
+    fn draw_point_pixels(&mut self, points: Vec<(f32, f32, u8, u8, u8, u8)>, half_size: f32) {
         if points.is_empty() {
             return;
         }
@@ -929,12 +1049,10 @@ impl SkiaTarget {
             None,
         );
         let mut pixels = vec![0u8; (self.width * self.height * 4) as usize];
-        if !self.surface.read_pixels(
-            &info,
-            &mut pixels,
-            (self.width * 4) as usize,
-            (0, 0),
-        ) {
+        if !self
+            .surface
+            .read_pixels(&info, &mut pixels, (self.width * 4) as usize, (0, 0))
+        {
             return Err(PyRuntimeError::new_err("Skia surface read_pixels failed"));
         }
         Ok(pixels)
@@ -961,19 +1079,20 @@ impl SkiaTarget {
             )));
         }
         let py = target.py();
-        let slice = buffer.as_mut_slice(py).ok_or_else(|| {
-            PyValueError::new_err("readback buffer must be C-contiguous")
-        })?;
-        let data = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected)
-        };
+        let slice = buffer
+            .as_mut_slice(py)
+            .ok_or_else(|| PyValueError::new_err("readback buffer must be C-contiguous"))?;
+        let data = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected) };
         let info = SkImageInfo::new(
             (self.width as i32, self.height as i32),
             ColorType::RGBA8888,
             AlphaType::Unpremul,
             None,
         );
-        if !self.surface.read_pixels(&info, data, (self.width * 4) as usize, (0, 0)) {
+        if !self
+            .surface
+            .read_pixels(&info, data, (self.width * 4) as usize, (0, 0))
+        {
             return Err(PyRuntimeError::new_err("Skia surface read_pixels failed"));
         }
         Ok(())
@@ -992,9 +1111,7 @@ impl SkiaTarget {
             .as_slice(pixels.py())
             .ok_or_else(|| PyValueError::new_err("pixel buffer must be C-contiguous"))?;
         // SAFETY: see raster_image; Skia only reads from the slice.
-        let bytes = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected)
-        };
+        let bytes = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected) };
         let info = SkImageInfo::new(
             (self.width as i32, self.height as i32),
             ColorType::RGBA8888,
@@ -1016,4 +1133,3 @@ fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", "0.1.0")?;
     Ok(())
 }
-
