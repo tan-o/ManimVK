@@ -191,9 +191,12 @@ class MeshSurface(Mobject):
     def _vertex_normals(self) -> np.ndarray:
         corners = self.points[self.triangles]
         face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
-        normals = np.zeros_like(self.points)
-        for k in range(3):
-            np.add.at(normals, self.triangles[:, k], face_normals)
+        vertices = self.triangles.ravel()
+        repeated = np.repeat(face_normals, 3, axis=0)
+        count = len(self.points)
+        normals = np.column_stack(
+            [np.bincount(vertices, weights=repeated[:, k], minlength=count) for k in range(3)]
+        )
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
         return normals / np.where(lengths == 0, 1, lengths)
 
@@ -206,19 +209,15 @@ class MeshSurface(Mobject):
         rgba = np.tile([*self.color.to_rgb(), 1.0], (count, 1))
         return [(white, rgba)]
 
-    def get_shaded_mesh(
-        self, camera: Camera, pieces: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Vertices, texture coordinates and colours of the triangles to draw.
+    def get_vertex_layers(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
+        """Per-vertex texture coordinates and colours of every layer, shapes
+        ``(layers, vertices, 2)`` and ``(layers, vertices, 4)``.
 
-        Each triangle is repeated once per layer: the base colour or image(s),
-        then a white highlight and a black shadow.  Every layer is a texel
-        times its vertex colour blended over the layers before it, which
-        evaluates ManimGL's surface lighting at the vertices.
+        The layers are the base colour or image(s), then a white highlight and
+        a black shadow; each is a texel times its vertex colour blended over
+        the ones before, which evaluates ManimGL's surface lighting at the
+        vertices.
         """
-        triangles = self.triangles if pieces is None else self.triangles[pieces]
-        if len(triangles) == 0 or len(self.points) == 0:
-            return None
         _, layout = _texture_atlas(*self._atlas_files())
         points = self.points
         normals = self._vertex_normals()
@@ -244,11 +243,25 @@ class MeshSurface(Mobject):
             darkening = np.zeros((len(points), 4))
             darkening[:, 3] = np.clip(np.maximum(-facing, 0) * shadow, 0, 1)
             layers.append((white, darkening))
+        return np.stack([uv for uv, _ in layers]), np.stack([rgba for _, rgba in layers])
 
-        count = len(layers)
-        positions = np.repeat(points[triangles][:, None], count, axis=1)
-        uvs = np.stack([uv[triangles] for uv, _ in layers], axis=1)
-        colors = np.stack([rgba[triangles] for _, rgba in layers], axis=1)
+    def get_shaded_mesh(
+        self,
+        camera: Camera,
+        pieces: np.ndarray | None = None,
+        vertex_layers: tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Vertices, texture coordinates and colours of the triangles to draw:
+        each triangle once per layer of :meth:`get_vertex_layers`, which may be
+        passed in when several runs of one surface are drawn in a frame."""
+        triangles = self.triangles if pieces is None else self.triangles[pieces]
+        if len(triangles) == 0 or len(self.points) == 0:
+            return None
+        uv_layers, rgba_layers = vertex_layers or self.get_vertex_layers(camera)
+        count = len(uv_layers)
+        positions = np.repeat(self.points[triangles][:, None], count, axis=1)
+        uvs = uv_layers[:, triangles].transpose(1, 0, 2, 3)
+        colors = rgba_layers[:, triangles].transpose(1, 0, 2, 3)
         return positions.reshape(-1, 3), uvs.reshape(-1, 2), colors.reshape(-1, 4)
 
 

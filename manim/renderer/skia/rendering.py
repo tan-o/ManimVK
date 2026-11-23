@@ -90,6 +90,7 @@ class SkiaDrawingContext(_CairoDrawingContext):
             for member in root.get_family()
         }
         self._subpath_tables = {}
+        self._vertex_layers = {}
         with self.camera._drawing():
             to_display = self.camera.get_mobjects_to_display(
                 mobjects,
@@ -159,7 +160,12 @@ class SkiaDrawingContext(_CairoDrawingContext):
 
     def _display_mesh_surfaces(self, items) -> None:
         for surface, pieces in items:
-            mesh = surface.get_shaded_mesh(self.camera, pieces)
+            key = id(surface)
+            layers = self._vertex_layers.get(key)
+            if layers is None or layers[0] is not surface:
+                layers = (surface, surface.get_vertex_layers(self.camera))
+                self._vertex_layers[key] = layers
+            mesh = surface.get_shaded_mesh(self.camera, pieces, layers[1])
             if mesh is None:
                 continue
             positions, uvs, colors = mesh
