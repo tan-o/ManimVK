@@ -73,6 +73,7 @@ from .mobject.text.text_mobject import *
 from .mobject.text.typst_mobject import *
 from .mobject.three_d.polyhedra import *
 from .mobject.three_d.three_d_utils import *
+from .mobject.three_d.mesh_surface import *
 from .mobject.three_d.three_dimensions import *
 from .mobject.types.image_mobject import *
 from .mobject.types.point_cloud_mobject import *

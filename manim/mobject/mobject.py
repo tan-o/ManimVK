@@ -138,6 +138,7 @@ class Mobject:
         self.dim = dim
         self.target = target
         self.z_index = z_index
+        self.depth_test = False
         self.point_hash = None
         self.submobjects: list[Mobject] = []
         self.updaters: list[_Updater] = []
@@ -3566,6 +3567,35 @@ class Mobject:
                 submob.set_z_index(z_index_value, family=family)
         self.z_index = z_index_value
         return self
+
+    def apply_depth_test(self, value: bool = True, family: bool = True) -> Self:
+        """Draw this mobject at its depth in a :class:`.ThreeDScene`.
+
+        Depth-tested mobjects are ordered back to front together with the
+        ``shade_in_3d`` mobjects, so that nearer objects cover farther ones.  A
+        depth-tested :class:`.VMobject` is ordered per subpath: a vector field
+        made of one path per arrow is partly hidden behind a sphere and partly
+        in front of it.  Other cameras ignore this flag.
+        """
+        for mobject in self.get_family() if family else [self]:
+            mobject.depth_test = value
+        return self
+
+    def deactivate_depth_test(self, family: bool = True) -> Self:
+        """Undo :meth:`apply_depth_test`."""
+        return self.apply_depth_test(False, family=family)
+
+    def get_depth_pieces(self) -> Point3D_Array | None:
+        """Reference points of the parts drawn at their own depth.
+
+        ``None`` means the mobject is ordered as a whole, by
+        :meth:`get_z_index_reference_point`.  Subclasses that are drawn in
+        parts return one point per part, shape ``(n, 3)``, or the corners of
+        each part, shape ``(n, k, 3)``, which orders a part by its farthest
+        corner.  The renderer passes the indices of the parts to draw back to
+        the mobject's drawing code.
+        """
+        return None
 
     def set_z_index_by_z_Point3D(self) -> Self:
         """Sets the :class:`~.Mobject`'s z Point3D to the value of :attr:`z_index`.

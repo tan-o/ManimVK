@@ -32,6 +32,23 @@ Without the variable, a discrete GPU is preferred, then an integrated GPU, then 
 CPU device such as lavapipe.  If no Vulkan physical device exists the renderer
 raises ``RuntimeError`` with installation guidance.
 
+Depth in 3D scenes
+------------------
+
+In a :class:`.ThreeDScene`, mobjects with ``shade_in_3d`` and mobjects marked
+with :meth:`.Mobject.apply_depth_test` are drawn back to front.  A depth-tested
+:class:`.VMobject` is ordered per subpath, so one path holding thousands of
+short strokes, such as the hairs of a vector field on a sphere, is partly
+hidden behind the sphere and partly in front of it, while still drawing in a
+few dozen GPU calls.
+
+:class:`.MeshSurface` draws a :class:`.Surface` as one smoothly lit triangle
+mesh and :class:`.TexturedSurface` stretches an image over it, optionally with
+a second image on the side facing away from the light.  Their triangles take
+part in the same depth ordering; a translucent mesh surface hides depth-tested
+mobjects behind it, as a depth buffer would.  These are drawn by the Vulkan
+renderer only.
+
 Custom shaders
 --------------
 

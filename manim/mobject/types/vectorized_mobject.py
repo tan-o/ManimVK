@@ -1386,6 +1386,22 @@ class VMobject(Mobject):
             lambda n: not self.consider_points_equals_2d(points[n - 1], points[n]),
         )
 
+    def get_depth_pieces(self) -> Point3D_Array | None:
+        """With :meth:`~.Mobject.apply_depth_test`, one center per subpath.
+
+        The indices passed back to the renderer index the rows of
+        ``get_subpath_split_indices_from_points(self.points)``.
+        """
+        if not self.depth_test or len(self.points) == 0:
+            return None
+        split = self.get_subpath_split_indices_from_points(self.points)
+        if len(split) <= 1:
+            return None
+        sums = np.zeros((len(self.points) + 1, 3))
+        np.cumsum(self.points, axis=0, out=sums[1:])
+        counts = (split[:, 1] - split[:, 0])[:, None]
+        return (sums[split[:, 1]] - sums[split[:, 0]]) / counts
+
     def get_subpath_split_indices_from_points(
         self, points: CubicBezierPathLike, n_dims: int = 3
     ) -> npt.NDArray[np.int_]:
