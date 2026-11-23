@@ -378,6 +378,25 @@ class SkiaDrawingContext(_CairoDrawingContext):
         source_pixels = np.ascontiguousarray(source, dtype=np.uint8)
         if source_pixels.ndim != 3 or source_pixels.shape[2] != 4:
             return
+        # PIL's perspective transform is the reference implementation used by
+        # Cairo, and no GPU sampler matches its bicubic kernel exactly.  Raster
+        # the plain ImageMobject on the CPU (the same code path as Cairo), then
+        # upload the finished frame 1:1, where no resampling can introduce a
+        # different phase.  ImageMobjectFromCamera stays on the GPU path above.
+        full_image = self._rasterize_image_mobject_cpu(image_mobject, source_pixels)
+        if full_image is not None:
+            settings = self.target.settings
+            width, height = settings.pixel_width, settings.pixel_height
+            self.target.draw_image_quad(
+                full_image.tobytes(),
+                width,
+                height,
+                [(0.0, 0.0), (float(width), 0.0), (float(width), float(height)),
+                 (0.0, float(height))],
+                1.0,
+                0,
+            )
+            return
         self.target.draw_image_quad(
             source_pixels.tobytes(),
             source_pixels.shape[1],
@@ -386,3 +405,97 @@ class SkiaDrawingContext(_CairoDrawingContext):
             1.0,
             _SAMPLING.get(image_mobject.resampling_algorithm, 2),
         )
+
+    def _rasterize_image_mobject_cpu(self, image_mobject, source_pixels):
+        """Perspective-warp an ImageMobject exactly like the Cairo renderer.
+
+        Returns a full-frame RGBA PIL image, or None when the quad is degenerate.
+        """
+        from manim.utils.space_ops import cross2d
+
+        sub_image = Image.fromarray(source_pixels, mode="RGBA")
+        original_coords = np.array(
+            [
+                [0, 0],
+                [sub_image.width, 0],
+                [0, sub_image.height],
+                [sub_image.width, sub_image.height],
+            ]
+        )
+        target_coords = self._points_to_subpixel_coords(
+            image_mobject,
+            image_mobject.points,
+        )
+        int_target_coords = target_coords.astype(np.int64)
+        settings = self.target.settings
+        shift_vector = np.maximum(int_target_coords.min(axis=0), 0)
+        upper_bounds = np.minimum(
+            int_target_coords.max(axis=0),
+            (settings.pixel_width, settings.pixel_height),
+        )
+        target_size = (
+            int(upper_bounds[0] - shift_vector[0]),
+            int(upper_bounds[1] - shift_vector[1]),
+        )
+        if min(target_size) <= 0:
+            return None
+        target_coords -= shift_vector
+
+        ordered_vertices = [target_coords[index] for index in (0, 1, 3, 2)]
+        sides = [
+            ordered_vertices[(index + 1) % 4] - ordered_vertices[index]
+            for index in range(4)
+        ]
+        side_lengths = np.linalg.norm(sides, axis=1)
+        longest_index = int(np.argmax(side_lengths))
+        longest_side = sides[longest_index]
+        longest_length = side_lengths[longest_index]
+        if longest_length == 0:
+            return None
+        previous_side = sides[(longest_index - 1) % 4]
+        next_side = sides[(longest_index + 1) % 4]
+        height_1 = abs(cross2d(longest_side, previous_side)) / longest_length
+        height_2 = abs(cross2d(longest_side, next_side)) / longest_length
+        if max(height_1, height_2) < 0.5:
+            return None
+
+        homography_matrix = []
+        for (x, y), (target_x, target_y) in zip(
+            target_coords,
+            original_coords,
+            strict=True,
+        ):
+            homography_matrix.append(
+                [x, y, 1, 0, 0, 0, -target_x * x, -target_x * y],
+            )
+            homography_matrix.append(
+                [0, 0, 0, x, y, 1, -target_y * x, -target_y * y],
+            )
+        matrix = np.array(homography_matrix, dtype=np.float64)
+        target = original_coords.reshape(8).astype(np.float64)
+        try:
+            coefficients = np.linalg.solve(matrix, target)
+        except np.linalg.LinAlgError:
+            return None
+
+        sub_image = sub_image.transform(
+            size=target_size,
+            method=Image.Transform.PERSPECTIVE,
+            data=coefficients,
+            resample=image_mobject.resampling_algorithm,
+        )
+        full_image = Image.new(
+            "RGBA",
+            (settings.pixel_width, settings.pixel_height),
+            (0, 0, 0, 0),
+        )
+        full_image.paste(
+            sub_image,
+            box=(
+                int(shift_vector[0]),
+                int(shift_vector[1]),
+                int(shift_vector[0] + target_size[0]),
+                int(shift_vector[1] + target_size[1]),
+            ),
+        )
+        return full_image
