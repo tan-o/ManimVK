@@ -3,7 +3,7 @@
 > **2026-11-23 后续更新**：性能补丁已合并（`d8b8fde`），静态背景每帧上传和 Fourier 箭头 tip 每帧重建已消除。最新 1080p60 100 向量实测为 **28.7s / 600 帧**（本文件下述 252.8s 是补丁前历史数据）。最新拆解、golden 逐帧对照与残余问题见 `MANIMVK_FRAMEWORK_AND_GOLDEN_REPORT.md`。
 
 日期：2026-11-23  
-范围：`C:\Users\Feysen\Work\Deepseek\ManimVK`（ManimCE 的 Vulkan/Skia fork）  
+范围：`<repo>`（ManimCE 的 Vulkan/Skia fork）  
 基准场景：3b1b `FourierOfPiSymbol` 的 ManimCE 移植版，100 个旋转向量 + 100 个圆 + 轨迹，10.000s  
 基准脚本：`%TEMP%\mvk_fourier\fourier_pi_100.py`（仓库外临时脚本）  
 本轮没有修改仓库代码；所有实验通过环境变量和运行时 monkeypatch 完成。
@@ -488,7 +488,7 @@ def set_length(self, length):
 ```powershell
 # 1080p60 完整 Vulkan
 $env:Q='high_quality'; $env:R='vulkan'; $env:SW='2'; $env:TIP='0.15'; $env:TIPR='0.2'
-& 'C:\Users\Feysen\Work\Deepseek\ManimVK\.venv\Scripts\python.exe' `
+& '<repo>\.venv\Scripts\python.exe' `
   "$env:TEMP\mvk_fourier\fourier_pi_100.py"
 
 # 只测 Python 更新 + 静态上传（无绘制、无出片）

@@ -111,7 +111,7 @@
 
 ## 5. 可复现的脚本与命令
 
-脚本：`C:\Users\Feysen\AppData\Local\Temp\mvk_fourier\fourier_pi_100.py`
+脚本：`<tmp>\mvk_fourier\fourier_pi_100.py`
 
 关键环境变量：
 
@@ -126,9 +126,9 @@ $env:TIPR='0.2'         # 箭头长度/向量长度上限
 运行：
 
 ```powershell
-& 'C:\Users\Feysen\Work\Deepseek\ManimVK\.venv\Scripts\python.exe' fourier_pi_100.py
+& '<repo>\.venv\Scripts\python.exe' fourier_pi_100.py
 # 原版 CE:
-& 'C:\Users\Feysen\AppData\Local\Temp\manimce_venv\Scripts\python.exe' fourier_pi_100.py
+& '<tmp>\manimce_venv\Scripts\python.exe' fourier_pi_100.py
 ```
 
 输出：

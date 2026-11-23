@@ -16,7 +16,7 @@ From this directory:
 
 ```powershell
 $env:SKIA_BINARIES_URL = 'file://C:/skia/skia-binaries.tar.gz'
-$env:LIB = 'C:\Users\Feysen\miniconda3\libs;' + $env:LIB
+$env:LIB = '%USERPROFILE%\miniconda3\libs;' + $env:LIB
 maturin build --release
 uv pip install --python ..\..\.venv\Scripts\python.exe --no-deps --reinstall `
   target\wheels\manim_vk-0.1.0-cp311-abi3-win_amd64.whl

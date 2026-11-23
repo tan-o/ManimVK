@@ -50,7 +50,7 @@
 
 ```powershell
 $env:SKIA_BINARIES_URL = 'file://C:/skia/skia-binaries.tar.gz'
-$env:LIB = 'C:\Users\Feysen\miniconda3\libs;' + $env:LIB
+$env:LIB = '%USERPROFILE%\miniconda3\libs;' + $env:LIB
 Set-Location native\manim_vk
 maturin build --release
 uv pip install --python ..\..\.venv\Scripts\python.exe --no-deps --reinstall `

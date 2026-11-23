@@ -1,8 +1,8 @@
 # ManimVK：bundle 合并、golden 收口与毛球动画
 
 日期：2026-11-23  
-仓库：`C:\Users\Feysen\Work\Deepseek\ManimVK`  
-远端正向：`https://github.com/tan-o/ManimVK`  
+仓库：`<repo>`  
+远端正向：`<GitHub remote>`  
 当前 master：`d50f33b`（已推送，取代 `bf06d86`）
 
 ---
@@ -20,7 +20,7 @@
 
 ## 1. bundle 审查
 
-bundle：`D:\trash\xwechat_files\wxid_v71wrokuf7j712_0e0d\msg\file\2026-11\manimvk-vulkan-strip.bundle`  
+bundle：`<attachment-dir>\manimvk-vulkan-strip.bundle`  
 head：`379522b8dbde62b209459f8c4970fb85722b428e refs/heads/vulkan-strip`  
 merge-base：`0108253`
 
@@ -55,9 +55,9 @@ bundle 与 master 的 4 个冲突文件：
 bundle 改了 `native/manim_vk/src/lib.rs`，必须重新编译：
 
 ```powershell
-$env:PATH = 'C:\Users\Feysen\.cargo\bin;' + $env:PATH
+$env:PATH = '%USERPROFILE%\.cargo\bin;' + $env:PATH
 $env:SKIA_BINARIES_URL = 'file:///C:/skia/skia-binaries.tar.gz'
-$env:LIB = 'C:\Users\Feysen\miniconda3\libs;' + $env:LIB
+$env:LIB = '%USERPROFILE%\miniconda3\libs;' + $env:LIB
 uv run --with maturin maturin build --release
 uv pip install --python .venv\Scripts\python.exe --no-deps --reinstall `
   native\manim_vk\target\wheels\manim_vk-0.1.0-cp311-abi3-win_amd64.whl
@@ -157,8 +157,8 @@ PASS 20 / FAIL 0 / REVIEW 10 / ERROR_CANDIDATE 0 / ERROR_BOTH 0
 
 ## 4. `hairy_ball.py` 实跑
 
-脚本：`D:\trash\xwechat_files\wxid_v71wrokuf7j712_0e0d\msg\file\2026-11\hairy_ball.py`  
-输出：`C:\Users\Feysen\Work\Deepseek\ManimVK\renders\hairy_ball\videos\hairy_ball\480p15`
+脚本：`<attachment-dir>\hairy_ball.py`  
+输出：`<repo>\renders\hairy_ball\videos\hairy_ball\480p15`
 
 | 场景 | 状态 | 输出 | 预览 |
 |---|---|---|---|

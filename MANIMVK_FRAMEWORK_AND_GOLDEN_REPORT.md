@@ -1,8 +1,8 @@
 # ManimVK 渲染框架与 Golden 逐帧对照报告
 
 日期：2026-11-23  
-仓库：`C:\Users\Feysen\Work\Deepseek\ManimVK`  
-远端：`https://github.com/tan-o/ManimVK`  
+仓库：`<repo>`  
+远端：`<GitHub remote>`  
 当前 `master`：`d50f33b`（`vulkan-strip` + 3D bundle 已合并并推送）  
 本轮性质：审查后的 golden 全量对照 + 根因修复；不是只留一个 Cairo 基线等人接手。
 
