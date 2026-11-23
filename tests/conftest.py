@@ -5,28 +5,13 @@ import sys
 from pathlib import Path
 
 import cairo
-import moderngl
 import pytest
 
 import manim
 
 
 def pytest_report_header(config):
-    try:
-        ctx = moderngl.create_standalone_context()
-        info = ctx.info
-        ctx.release()
-    except Exception as e:
-        raise Exception("Error while creating moderngl context") from e
-
-    return (
-        f"\nCairo Version: {cairo.cairo_version()}",
-        "\nOpenGL information",
-        "------------------",
-        f"vendor: {info['GL_VENDOR'].strip()}",
-        f"renderer: {info['GL_RENDERER'].strip()}",
-        f"version: {info['GL_VERSION'].strip()}\n",
-    )
+    return f"\nCairo Version: {cairo.cairo_version()}"
 
 
 def pytest_addoption(parser):
@@ -115,13 +100,3 @@ def reset_cfg_file():
     original = cfgfilepath.read_text()
     yield
     cfgfilepath.write_text(original)
-
-
-@pytest.fixture
-def using_opengl_renderer(config):
-    """Standard fixture for running with opengl that makes tests use a standard_config.cfg with a temp dir."""
-    config.renderer = "opengl"
-    yield
-    # as a special case needed to manually revert back to cairo
-    # due to side effects of setting the renderer
-    config.renderer = "cairo"

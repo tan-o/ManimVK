@@ -99,15 +99,6 @@ def render(**kwargs: Any) -> ClickArgs | dict[str, Any]:
         timeline_output = timeline_output.absolute()
     if timeline_output is not None and kwargs["jupyter"]:
         raise cloup.UsageError("Use Manager.evaluate(capture_timeline=True) in Python.")
-    if kwargs.get("renderer") == "opengl":
-        # The OpenGL SPI is a compatibility facade backed by the same classic
-        # mobjects as the Vulkan/Skia path.  Route the legacy CLI spelling to
-        # Vulkan instead of opening a second GL context.
-        logger.warning(
-            "--renderer=opengl is routed to the Vulkan/Skia renderer; the OpenGL "
-            "family classes are compatibility aliases.",
-        )
-        kwargs["renderer"] = "vulkan"
     click_args = ClickArgs(kwargs)
     if kwargs["jupyter"]:
         return click_args

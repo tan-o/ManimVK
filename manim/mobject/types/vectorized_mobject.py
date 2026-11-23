@@ -20,10 +20,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import numpy as np
 from PIL.Image import Image
 
-from manim import config
 from manim.constants import *
 from manim.mobject.mobject import Mobject
-from manim.mobject.opengl.opengl_compatibility import ConvertToOpenGL
 from manim.mobject.three_d.three_d_utils import (
     get_3d_vmob_gradient_start_and_end_points,
 )
@@ -175,7 +173,6 @@ class VMobject(Mobject):
     def __iter__(self) -> Iterator[VMobject]:
         return cast(Iterator[VMobject], super().__iter__())
 
-    # OpenGL compatibility
     @property
     def n_points_per_curve(self) -> int:
         return self.n_points_per_cubic_curve
@@ -2180,7 +2177,7 @@ class VMobject(Mobject):
         return self
 
 
-class VGroup(VMobject, metaclass=ConvertToOpenGL):
+class VGroup(VMobject):
     """A group of vectorized mobjects.
 
     This can be used to group multiple :class:`~.VMobject` instances together
@@ -2407,7 +2404,7 @@ class VGroup(VMobject, metaclass=ConvertToOpenGL):
         return cast(VMobject, super().__getitem__(key))
 
 
-class VDict(VMobject, metaclass=ConvertToOpenGL):
+class VDict(VMobject):
     """A VGroup-like class, also offering submobject access by
     key, like a python dict
 
@@ -2745,7 +2742,7 @@ class VDict(VMobject, metaclass=ConvertToOpenGL):
         return self
 
 
-class VectorizedPoint(VMobject, metaclass=ConvertToOpenGL):
+class VectorizedPoint(VMobject):
     def __init__(
         self,
         location: Point3DLike = ORIGIN,
@@ -2860,7 +2857,7 @@ class CurvesAsSubmobjects(VGroup):
             current_length += part_length
 
 
-class DashedVMobject(VMobject, metaclass=ConvertToOpenGL):
+class DashedVMobject(VMobject):
     """A :class:`VMobject` composed of dashes instead of lines.
 
     Parameters
@@ -3026,10 +3023,7 @@ class DashedVMobject(VMobject, metaclass=ConvertToOpenGL):
                 )
         # Family is already taken care of by get_subcurve
         # implementation
-        if config.renderer == RendererType.OPENGL:
-            self.match_style(base_vmobject, recurse=False)
-        else:
-            self.match_style(base_vmobject, family=False)
+        self.match_style(base_vmobject, family=False)
 
         if tips is not None:
             self.add(*tips.submobjects)

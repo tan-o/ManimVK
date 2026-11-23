@@ -7,7 +7,8 @@ Animation, SceneFileWriter and every classic Mobject unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import manim_vk
@@ -16,7 +17,7 @@ from PIL import Image
 from manim import logger
 from manim.mobject.mobject import Mobject
 from manim.mobject.types.image_mobject import ImageMobjectFromCamera
-from manim.renderer.cairo.camera import Camera, MultiCamera
+from manim.camera import Camera, MultiCamera
 from manim.renderer.cairo.renderer import CairoRenderer
 from manim.renderer.cairo.target import _ImageFiles
 from manim.renderer.protocol import RendererCapabilities, RendererState
@@ -41,10 +42,8 @@ class SkiaRenderer(CairoRenderer):
         super().__init__(*args, **kwargs)
         self._vk_device = None
         self._skia_targets: list[SkiaRenderTarget] = []
+        self._snapshot_renderer: SkiaRenderer | None = None
         self.window = None
-        # ``Shader`` objects in user scenes are accepted with this value; the
-        # Skia mesh adapter reads raw vertex attributes and never compiles GLSL.
-        self.context = None
 
     def init_scene(self, scene: Scene, session_spec) -> None:
         super().init_scene(scene, session_spec)
@@ -217,7 +216,7 @@ class SkiaRenderer(CairoRenderer):
         *,
         excluded_mobjects: list[Mobject] | None = None,
     ) -> None:
-        """Draw classic mobjects and then any public ``Mesh`` objects.
+        """Draw the scene's mobjects.
 
         A frame starts from the play's static layer, which stays on the GPU,
         instead of uploading the static image as the Cairo renderer copies it.
@@ -228,32 +227,15 @@ class SkiaRenderer(CairoRenderer):
         self._final_scene = None
         if not mobjects:
             mobjects = list_update(scene.mobjects, scene.foreground_mobjects)
-        classic_mobjects: list[Mobject] = []
-        mesh_roots: list[Any] = []
-        for mob in mobjects:
-            # Mesh/Object3D lives outside the classic Mobject hierarchy and
-            # dragging in manim.renderer.opengl.shader would import moderngl.
-            if isinstance(mob, Mobject):
-                classic_mobjects.append(mob)
-            elif hasattr(mob, "attributes") or hasattr(mob, "model_matrix"):
-                mesh_roots.append(mob)
-        for mesh in getattr(scene, "meshes", []):
-            if mesh not in mesh_roots:
-                mesh_roots.append(mesh)
-
         target = self._get_target()
         if not target.restore_static_layer():
             target.reset(self.camera)
         self._draw_frame(
             camera=self.camera,
-            mobjects=classic_mobjects,
+            mobjects=mobjects,
             include_submobjects=include_submobjects,
             excluded_mobjects=excluded_mobjects,
         )
-        if mesh_roots:
-            from .mesh import draw_meshes
-
-            draw_meshes(mesh_roots, camera=self.camera, target=target)
 
     def save_static_frame_data(
         self,
@@ -279,6 +261,10 @@ class SkiaRenderer(CairoRenderer):
         if self._target is not None and not self._target._closed:
             self._target.clear_static_layer()
 
+    def _animation_cache_identity(self, scene: Scene) -> tuple[str, Any]:
+        # Its own backend name, so Cairo and Vulkan segments never share a cache key.
+        return "vulkan", ()
+
     def _present_frame(self, scene: Scene, frame_offset: float) -> None:
         if self.window is not None:
             self.window.swap_buffers()
@@ -287,14 +273,30 @@ class SkiaRenderer(CairoRenderer):
         if self.window is not None:
             self.window.swap_buffers()
 
+    def _new_snapshot_renderer(self) -> SkiaRenderer:
+        """A renderer for snapshots that shares this renderer's Vulkan device."""
+        renderer = SkiaRenderer(camera=self.camera, _raster_settings=self._raster_settings)
+        renderer._vk_device = self._ensure_device()
+        return renderer
+
+    @contextmanager
+    def _scene_images(self) -> Iterator[None]:
+        """Keep one snapshot renderer open while an evaluation requests images."""
+        renderer = self._new_snapshot_renderer()
+        self._snapshot_renderer = renderer
+        try:
+            yield
+        finally:
+            self._snapshot_renderer = None
+            renderer.close()
+
     def _get_scene_image(self, scene: Scene) -> Image.Image:
-        with SkiaRenderer(
-            camera=self.camera,
-            _raster_settings=self._raster_settings,
-        ) as renderer:
-            renderer.render_mobjects(
-                list_update(scene.mobjects, scene.foreground_mobjects)
-            )
+        mobjects = list_update(scene.mobjects, scene.foreground_mobjects)
+        if self._snapshot_renderer is not None:
+            self._snapshot_renderer.render_mobjects(mobjects)
+            return self._snapshot_renderer.get_image()
+        with self._new_snapshot_renderer() as renderer:
+            renderer.render_mobjects(mobjects)
             return renderer.get_image()
 
     def scene_finished(self, scene: Scene) -> None:

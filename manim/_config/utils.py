@@ -267,7 +267,6 @@ class ManimConfig(MutableMapping):
         "disable_caching_warning",
         "dry_run",
         "encoder_queue_size",
-        "enable_wireframe",
         "format",
         "frame_height",
         "frame_rate",
@@ -306,10 +305,6 @@ class ManimConfig(MutableMapping):
         "text_dir",
         "upto_animation_number",
         "renderer",
-        "enable_gui",
-        "gui_location",
-        "use_projection_fill_shaders",
-        "use_projection_stroke_shaders",
         "verbosity",
         "video_codec",
         "video_dir",
@@ -380,8 +375,6 @@ class ManimConfig(MutableMapping):
             renderer = obj.renderer
             self._d.update(obj._d)
             if renderer is not None:
-                # Apply the renderer through its setter so that the
-                # ConvertToOpenGL class bases stay in sync with the config value.
                 self.renderer = renderer
             if obj.tex_template:
                 self.tex_template = obj.tex_template
@@ -603,11 +596,7 @@ class ManimConfig(MutableMapping):
             "log_to_file",
             "disable_caching",
             "disable_caching_warning",
-            "enable_gui",
             "fullscreen",
-            "use_projection_fill_shaders",
-            "use_projection_stroke_shaders",
-            "enable_wireframe",
             "no_latex_cleanup",
             "dry_run",
         ]:
@@ -661,10 +650,6 @@ class ManimConfig(MutableMapping):
             setattr(self, key, parser["CLI"].getfloat(key))
 
         # tuple keys
-        gui_location = tuple(
-            map(int, re.split(r"[;,\-]", parser["CLI"]["gui_location"])),
-        )
-        self.gui_location = gui_location
 
         window_size = parser["CLI"][
             "window_size"
@@ -779,12 +764,8 @@ class ManimConfig(MutableMapping):
             "verbosity",
             "renderer",
             "background_color",
-            "enable_gui",
             "fullscreen",
-            "use_projection_fill_shaders",
-            "use_projection_stroke_shaders",
             "zero_pad",
-            "enable_wireframe",
             "dry_run",
             "no_latex_cleanup",
             "preview_command",
@@ -841,10 +822,6 @@ class ManimConfig(MutableMapping):
         # Handle --tex_template
         if args.tex_template:
             self.tex_template = TexTemplate.from_file(args.tex_template)
-
-        # Handle --gui_location flag.
-        if args.gui_location is not None:
-            self.gui_location = args.gui_location
 
         return self
 
@@ -975,15 +952,6 @@ class ManimConfig(MutableMapping):
     @save_sections.setter
     def save_sections(self, value: bool) -> None:
         self._set_boolean("save_sections", value)
-
-    @property
-    def enable_wireframe(self) -> bool:
-        """Whether to enable wireframe debugging mode in opengl."""
-        return self._d["enable_wireframe"]
-
-    @enable_wireframe.setter
-    def enable_wireframe(self, value: bool) -> None:
-        self._set_boolean("enable_wireframe", value)
 
     @property
     def no_latex_cleanup(self) -> bool:
@@ -1368,9 +1336,9 @@ class ManimConfig(MutableMapping):
             >>> test_config = ManimConfig()
             >>> test_config.renderer is None  # a new ManimConfig is unpopulated
             True
-            >>> test_config.renderer = 'opengl'
+            >>> test_config.renderer = 'vulkan'
             >>> test_config.renderer
-            <RendererType.OPENGL: 'opengl'>
+            <RendererType.VULKAN: 'vulkan'>
             >>> test_config.renderer = 42
             Traceback (most recent call last):
             ...
@@ -1378,27 +1346,17 @@ class ManimConfig(MutableMapping):
 
         Check that capitalization of renderer types is irrelevant::
 
-            >>> test_config.renderer = 'OpenGL'
+            >>> test_config.renderer = 'Vulkan'
             >>> test_config.renderer = 'cAirO'
         """
         return self._d["renderer"]
 
     @renderer.setter
     def renderer(self, value: str | RendererType) -> None:
-        """Set the renderer selection.
-
-        The classic mobject family is shared by the Vulkan, Cairo and legacy
-        compatibility paths; the retired OpenGL renderer no longer swaps class
-        bases at runtime.
-        """
+        """Set the renderer selection."""
         if isinstance(value, str):
             value = value.lower()
-        renderer = RendererType(value)
-        if renderer is RendererType.OPENGL:
-            # The retired moderngl backend is not selectable.  Keep the old
-            # CLI/config spelling working by routing it to Vulkan/Skia.
-            renderer = RendererType.VULKAN
-        self._set_from_enum("renderer", renderer, RendererType)
+        self._set_from_enum("renderer", RendererType(value), RendererType)
 
     @property
     def media_dir(self) -> str:
@@ -1420,30 +1378,12 @@ class ManimConfig(MutableMapping):
 
     @property
     def window_size(self) -> str | tuple[int, ...]:
-        """The size of the opengl window. 'default' to automatically scale the window based on the display monitor."""
+        """The size of the preview window. 'default' to automatically scale the window based on the display monitor."""
         return self._d["window_size"]
 
     @window_size.setter
     def window_size(self, value: str | tuple[int, ...]) -> None:
         self._d.__setitem__("window_size", value)
-
-    @property
-    def enable_gui(self) -> bool:
-        """Enable GUI interaction."""
-        return self._d["enable_gui"]
-
-    @enable_gui.setter
-    def enable_gui(self, value: bool) -> None:
-        self._set_boolean("enable_gui", value)
-
-    @property
-    def gui_location(self) -> tuple[int, ...]:
-        """Location parameters for the GUI window (e.g., screen coordinates or layout settings)."""
-        return self._d["gui_location"]
-
-    @gui_location.setter
-    def gui_location(self, value: tuple[Any]) -> None:
-        self._set_tuple("gui_location", value)
 
     @property
     def fullscreen(self) -> bool:
@@ -1453,24 +1393,6 @@ class ManimConfig(MutableMapping):
     @fullscreen.setter
     def fullscreen(self, value: bool) -> None:
         self._set_boolean("fullscreen", value)
-
-    @property
-    def use_projection_fill_shaders(self) -> bool:
-        """Use shaders for OpenGLVMobject fill which are compatible with transformation matrices."""
-        return self._d["use_projection_fill_shaders"]
-
-    @use_projection_fill_shaders.setter
-    def use_projection_fill_shaders(self, value: bool) -> None:
-        self._set_boolean("use_projection_fill_shaders", value)
-
-    @property
-    def use_projection_stroke_shaders(self) -> bool:
-        """Use shaders for OpenGLVMobject stroke which are compatible with transformation matrices."""
-        return self._d["use_projection_stroke_shaders"]
-
-    @use_projection_stroke_shaders.setter
-    def use_projection_stroke_shaders(self, value: bool) -> None:
-        self._set_boolean("use_projection_stroke_shaders", value)
 
     @property
     def zero_pad(self) -> int:

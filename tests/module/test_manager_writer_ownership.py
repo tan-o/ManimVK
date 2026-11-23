@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from manim import CairoRenderer, Manager, Scene, Wait, tempconfig
-from manim.renderer.opengl import OpenGLRenderer
+from manim.renderer.skia import SkiaRenderer
 from manim.scene.scene_file_writer import SceneFileWriter
 
 
@@ -27,7 +27,7 @@ def writer_scene(tmp_path, request):
         }
     ):
         factory = Mock(wraps=SceneFileWriter)
-        renderer_class = CairoRenderer if backend == "cairo" else OpenGLRenderer
+        renderer_class = CairoRenderer if backend == "cairo" else SkiaRenderer
         scene = Scene(renderer=renderer_class(file_writer_class=factory))
         try:
             yield scene, factory

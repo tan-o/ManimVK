@@ -25,7 +25,7 @@ from .. import config
 from ..animation.composition import AnimationGroup, Succession
 from ..animation.creation import Create
 from ..animation.indication import ShowPassingFlash
-from ..constants import OUT, RIGHT, UP, RendererType
+from ..constants import OUT, RIGHT, UP
 from ..mobject.mobject import Mobject
 from ..mobject.types.vectorized_mobject import VGroup, VMobject
 from ..utils.bezier import interpolate, inverse_interpolate
@@ -861,12 +861,6 @@ class StreamLines(VectorField):
         max_steps = ceil(virtual_time / dt) + 1
         if not self.single_color:
             self.background_img = self.get_colored_background_image()
-            if config.renderer == RendererType.OPENGL:
-                self.values_to_rgbas = self.get_vectorized_rgba_gradient_function(
-                    min_color_scheme_value,
-                    max_color_scheme_value,
-                    colors,
-                )
         for point in start_points:
             points = [point]
             for _ in range(max_steps):
@@ -887,24 +881,13 @@ class StreamLines(VectorField):
                     color=self.color, width=self.stroke_width, opacity=opacity
                 )
             else:
-                if config.renderer == RendererType.OPENGL:
-                    # scaled for compatibility with cairo
-                    line.set_stroke(width=self.stroke_width / 4.0)
-                    norms = np.array(
-                        [np.linalg.norm(self.func(point)) for point in line.points],
-                    )
-                    line.set_rgba_array_direct(
-                        self.values_to_rgbas(norms, opacity),
-                        name="stroke_rgba",
+                if np.any(self.z_range != np.array([0, 0.5, 0.5])):
+                    line.set_stroke(
+                        [self.pos_to_color(p) for p in line.get_anchors()],
                     )
                 else:
-                    if np.any(self.z_range != np.array([0, 0.5, 0.5])):
-                        line.set_stroke(
-                            [self.pos_to_color(p) for p in line.get_anchors()],
-                        )
-                    else:
-                        line.color_using_background_image(self.background_img)
-                    line.set_stroke(width=self.stroke_width, opacity=opacity)
+                    line.color_using_background_image(self.background_img)
+                line.set_stroke(width=self.stroke_width, opacity=opacity)
             self.add(line)
         self.stream_lines = [
             line for line in self.submobjects if isinstance(line, StreamLine)

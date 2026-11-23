@@ -17,7 +17,7 @@ def scene(monkeypatch):
     fake_window.error.return_value = None
     fake_window.adapter_name.return_value = ""
     monkeypatch.setattr(manim_vk, "NativeWindow", Mock(return_value=fake_window))
-    with tempconfig({"renderer": "opengl", "format": "none", "live_preview": True}):
+    with tempconfig({"renderer": "vulkan", "format": "none", "live_preview": True}):
         scene = Scene()
         with scene._get_manager():
             yield scene

@@ -42,11 +42,11 @@ open the rendered artifact after rendering. This behavior is the same for all
 renderers.
 
 Renderers may also support a live preview while the scene is evaluated. The
-OpenGL renderer provides this with ``-l`` (or ``--live-preview``):
+Vulkan renderer provides this with ``-l`` (or ``--live-preview``):
 
 .. code-block:: bash
 
-   manim --renderer=opengl -l <file.py> SceneName
+   manim -l <file.py> SceneName
 
 With ``--format=auto``, live preview does not write a media file, keeping the
 interactive workflow fast. Pass a concrete format, such as ``--format=mp4``,

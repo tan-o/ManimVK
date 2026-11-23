@@ -31,7 +31,7 @@ if TYPE_CHECKING:
         RGBAPixelArray,
     )
 
-    from .camera import Camera
+    from ...camera import Camera
 
 # These values match cairo's LineJoin / LineCap enum values and the constants
 # consumed by the native Skia target.  Keeping them as plain integers avoids a

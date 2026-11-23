@@ -61,9 +61,8 @@ def test_max_files_cached_uses_minus_one_for_unlimited(config):
         config.max_files_cached = float("inf")
 
 
-def test_tempconfig_restores_renderer_class_bases(config):
-    with tempconfig({"renderer": "opengl"}):
-        # ``opengl`` is a compatibility spelling for the Vulkan/Skia backend.
+def test_tempconfig_restores_renderer(config):
+    with tempconfig({"renderer": "vulkan"}):
         assert config.renderer == RendererType.VULKAN
         assert issubclass(Vector, VMobject)
 
@@ -395,12 +394,12 @@ def test_cli_distinguishes_preview_from_live_preview(tmp_path):
     assert result.return_value.live_preview is True
 
 
-def test_opengl_cli_no_longer_disables_automatic_output(tmp_path, config):
+def test_vulkan_cli_keeps_automatic_output(tmp_path, config):
     scene_file = tmp_path / "scene.py"
     scene_file.write_text("# --jupyter returns before loading this file\n")
     result = CliRunner().invoke(
         render,
-        [str(scene_file), "--jupyter", "--renderer=opengl"],
+        [str(scene_file), "--jupyter", "--renderer=vulkan"],
         standalone_mode=False,
     )
     assert result.exception is None

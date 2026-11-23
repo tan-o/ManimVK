@@ -144,7 +144,7 @@ class _OpRecorder:
     [Circle(), Square(), Vector([1, 2, 0]), Circle().pointwise_become_partial(Circle(), 0.1, 0.6)],
 )
 def test_batched_path_matches_cairo_path(mobject):
-    from manim.renderer.cairo.camera import Camera
+    from manim.camera import Camera
 
     camera = Camera()
     for vmobject in mobject.family_members_with_points():

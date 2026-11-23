@@ -10,7 +10,7 @@ from manim.manager import _State
 from manim.renderer.protocol import RendererState
 
 
-@pytest.fixture(params=["cairo", "opengl"])
+@pytest.fixture(params=["cairo", "vulkan"])
 def managed_scene(request, tmp_path):
     with tempconfig(
         {

@@ -14,7 +14,7 @@ from manim.renderer.cairo.target import (
 )
 
 if TYPE_CHECKING:
-    from manim.renderer.cairo.camera import Camera
+    from manim.camera import Camera
     from manim.typing import RGBAPixelArray
 
 
@@ -163,34 +163,6 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._mark_gpu_written()
         return self._native
 
-    def draw_vertices(self, positions, colors) -> None:
-        """Draw pre-projected triangles with per-vertex RGBA colours."""
-        self._ensure_open()
-        self._native.draw_vertices(
-            [(float(x), float(y)) for x, y in positions],
-            [
-                (
-                    int(round(float(r) * 255)),
-                    int(round(float(g) * 255)),
-                    int(round(float(b) * 255)),
-                    int(round(float(a) * 255)),
-                )
-                for r, g, b, a in colors
-            ],
-        )
-        self._mark_gpu_written()
-
-    def set_anti_alias(self, enabled: bool) -> None:
-        """Toggle edge antialiasing for the next vector batch."""
-        self._ensure_open()
-        self._native.set_anti_alias(bool(enabled))
-
-    def draw_hsb_quad(self, time: float) -> None:
-        """Evaluate the full-screen HSB shader on the Skia Vulkan backend."""
-        self._ensure_open()
-        self._native.draw_hsb_quad(float(time))
-        self._mark_gpu_written()
-
     def draw_image_quad(self, pixels, width: int, height: int, quad, alpha: float) -> None:
         """Draw an RGBA image into a device-space quad on the GPU."""
         self._ensure_open()
@@ -233,12 +205,6 @@ class SkiaRenderTarget(_CairoRenderTarget):
             else:
                 normalized.append((str(name), [float(v) for v in value]))
         self._native.draw_sksl_quad(source, normalized, quad)
-        self._mark_gpu_written()
-
-    def draw_design3_quad(self, time: float) -> None:
-        """Evaluate Manim's raymarched ``design_3`` shader on Vulkan."""
-        self._ensure_open()
-        self._native.draw_design3_quad(float(time))
         self._mark_gpu_written()
 
     def commit(self) -> None:

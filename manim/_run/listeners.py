@@ -92,7 +92,7 @@ class _Encoder(_RunListener):
 class _Preview(_RunListener):
     """Draw each frame of the output into the renderer's target and show it.
 
-    Only OpenGL shows frames, in its preview window, paced by wall-clock time.
+    Renderers with a live preview show frames in their window.
     """
 
     def __init__(self, manager: Manager) -> None:
@@ -109,24 +109,6 @@ class _Preview(_RunListener):
         else:
             manager.renderer._present_frame(scene, frame.offset)
 
-
-class _MeshGuard(_RunListener):
-    """Reject GPU-backed meshes, which evaluation cannot run without a context."""
-
-    def __init__(self, manager: Manager) -> None:
-        self._manager = manager
-
-    def check(self) -> None:
-        if self._manager.scene.meshes:
-            raise RuntimeError(
-                "GPU-backed meshes are unsupported in an evaluated scene."
-            )
-
-    def play_started(self, play: _Play) -> None:
-        self.check()
-
-    def frame(self, frame: _Frame) -> None:
-        self.check()
 
 
 class _FrameRequests(_RunListener):

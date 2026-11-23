@@ -7,4 +7,4 @@ Renderers
    :toctree: ../reference
 
    ~renderer.cairo.renderer
-   ~renderer.opengl.renderer
+   ~renderer.skia.renderer

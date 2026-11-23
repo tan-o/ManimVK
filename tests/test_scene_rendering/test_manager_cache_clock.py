@@ -32,7 +32,7 @@ def decoded_frames(path):
         return [frame.to_ndarray(format="rgba") for frame in video.decode(video=0)]
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 def test_time_dependent_cache_and_fractional_downstream_epochs(tmp_path, backend):
     with tempconfig(
         {

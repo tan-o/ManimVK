@@ -165,7 +165,7 @@ def test_s_flag(tmp_path, manim_cfg_file, simple_scenes_path, still_flag):
 
 
 @pytest.mark.slow
-def test_s_flag_opengl_renderer(tmp_path, manim_cfg_file, simple_scenes_path):
+def test_s_flag_vulkan_renderer(tmp_path, manim_cfg_file, simple_scenes_path):
     scene_name = "SquareToCircle"
     command = [
         sys.executable,
@@ -174,7 +174,7 @@ def test_s_flag_opengl_renderer(tmp_path, manim_cfg_file, simple_scenes_path):
         "-ql",
         "-s",
         "--renderer",
-        "opengl",
+        "vulkan",
         "--media_dir",
         str(tmp_path),
         str(simple_scenes_path),
@@ -531,12 +531,12 @@ def test_images_are_created_when_png_sequence_format_set(
 
 
 @pytest.mark.slow
-def test_images_are_created_when_png_sequence_format_set_for_opengl(
+def test_images_are_created_when_png_sequence_format_set_for_vulkan(
     tmp_path,
     manim_cfg_file,
     simple_scenes_path,
 ):
-    """Test OpenGL images are created when --format png-sequence is set."""
+    """Test Vulkan images are created when --format png-sequence is set."""
     scene_name = "SquareToCircle"
     command = [
         sys.executable,
@@ -544,7 +544,7 @@ def test_images_are_created_when_png_sequence_format_set_for_opengl(
         "manim",
         "-ql",
         "--renderer",
-        "opengl",
+        "vulkan",
         "--media_dir",
         str(tmp_path),
         "--format",
@@ -597,12 +597,12 @@ def test_png_sequence_images_are_zero_padded(
 
 
 @pytest.mark.slow
-def test_opengl_png_sequence_images_are_zero_padded(
+def test_vulkan_png_sequence_images_are_zero_padded(
     tmp_path,
     manim_cfg_file,
     simple_scenes_path,
 ):
-    """Test OpenGL PNG-sequence images respect --zero_pad."""
+    """Test Vulkan PNG-sequence images respect --zero_pad."""
     scene_name = "SquareToCircle"
     command = [
         sys.executable,
@@ -610,7 +610,7 @@ def test_opengl_png_sequence_images_are_zero_padded(
         "manim",
         "-ql",
         "--renderer",
-        "opengl",
+        "vulkan",
         "--media_dir",
         str(tmp_path),
         "--format",

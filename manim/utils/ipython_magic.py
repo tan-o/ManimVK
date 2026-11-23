@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from manim import config, logger, tempconfig
-from manim.renderer.opengl.shader import shader_program_cache as opengl_shader_program_cache
 
 from ..constants import RendererType
 
@@ -135,27 +134,17 @@ else:
                 config.digest_args(args)
 
                 renderer = None
-                renderer_shader_cache = opengl_shader_program_cache
                 if config.renderer == RendererType.VULKAN:
                     from manim.renderer.skia import SkiaRenderer
 
                     renderer = SkiaRenderer()
-                    renderer_shader_cache = None
-                elif config.renderer == RendererType.OPENGL:
-                    from manim.renderer.opengl import OpenGLRenderer
-
-                    renderer = OpenGLRenderer()
 
                 try:
                     SceneClass = local_ns[config["scene_names"][0]]
                     scene = SceneClass(renderer=renderer)
                     scene.render()
                 finally:
-                    # Shader cache becomes invalid as the context is destroyed
-                    if renderer_shader_cache is not None:
-                        renderer_shader_cache.clear()
-
-                    # Close OpenGL window here instead of waiting for the main thread to
+                    # Close the preview window here instead of waiting for the main thread to
                     # finish causing the window to stay open and freeze
                     if renderer is not None and renderer.window is not None:
                         renderer.window.close()

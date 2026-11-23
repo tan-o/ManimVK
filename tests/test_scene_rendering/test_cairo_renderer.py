@@ -107,7 +107,8 @@ def test_hash_logic_is_called_when_caching_is_enabled(using_temp_config):
         scene = SquareToCircle()
         scene.render()
         mocked.assert_called_once()
-        assert mocked.call_args.kwargs["backend"] == "cairo"
+        # The default renderer is Vulkan, which has its own cache identity.
+        assert mocked.call_args.kwargs["backend"] == "vulkan"
         assert mocked.call_args.kwargs["encoder_fingerprint"] != "none"
 
 

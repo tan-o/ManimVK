@@ -263,17 +263,16 @@ class RendererType(Enum):
     setting, the values are then replaced by the corresponding enum object.
     In other words, you can run::
 
-        config.renderer = "opengl"
+        config.renderer = "vulkan"
 
     and checking the renderer afterwards reveals that the attribute has
     assumed the value::
 
-        <RendererType.OPENGL: 'opengl'>
+        <RendererType.VULKAN: 'vulkan'>
     """
 
-    CAIRO = "cairo"  #: A renderer based on the cairo backend.
-    OPENGL = "opengl"  #: An OpenGL-based renderer.
-    VULKAN = "vulkan"  #: A Vulkan-based renderer.
+    CAIRO = "cairo"  #: The Cairo reference rasterizer.
+    VULKAN = "vulkan"  #: The Skia/Vulkan renderer.
 
 
 class LineJointType(Enum):
