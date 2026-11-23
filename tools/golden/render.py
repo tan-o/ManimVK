@@ -34,6 +34,16 @@ SAMPLE_STEP = 0.5
 MAX_SAMPLED_TIME = 240.0
 
 
+def _seed() -> None:
+    """Same random numbers for both renderers (graph layouts, stream lines)."""
+    import random
+
+    import numpy as np
+
+    random.seed(0)
+    np.random.seed(0)
+
+
 def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, height: int) -> None:
     """Render one scene in this process (called through ``--worker``)."""
     import importlib.util
@@ -66,6 +76,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
         # 1. Frames as evaluation draws them.
         with tempconfig({**settings, "format": "none"}):
             frames = []
+            _seed()
             times = np.arange(0.0, MAX_SAMPLED_TIME, SAMPLE_STEP).tolist()
             Manager(scene_class()).evaluate(frame_times=times, on_frame=frames.append)
             if frames:
@@ -75,6 +86,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
                     status["frames"].append({"name": name, "time": frame.time})
         # 2. The last frame of a real render.
         with tempconfig({**settings, "format": "png"}):
+            _seed()
             scene = scene_class()
             scene.render()
             images = sorted((target / "media").rglob("*.png"), key=lambda p: p.stat().st_mtime)
@@ -127,7 +139,7 @@ def main() -> None:
         try:
             result = subprocess.run(
                 command, cwd=cwd_for(entry), capture_output=True, text=True,
-                timeout=args.timeout, env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                timeout=args.timeout, env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONHASHSEED": "0"},
             )
             if not (target / "status.json").exists():
                 target.mkdir(parents=True, exist_ok=True)
