@@ -11,6 +11,7 @@ from manim.cli.checkhealth.commands import checkhealth
 from manim.cli.default_group import DefaultGroup
 from manim.cli.init.commands import init
 from manim.cli.plugins.commands import plugins
+from manim.cli.preview.commands import preview, storyboard
 from manim.cli.render.commands import render
 from manim.constants import EPILOG
 
@@ -98,6 +99,8 @@ main.add_command(cfg)
 main.add_command(plugins)
 main.add_command(init)
 main.add_command(render)
+main.add_command(preview)
+main.add_command(storyboard)
 
 if __name__ == "__main__":
     main()

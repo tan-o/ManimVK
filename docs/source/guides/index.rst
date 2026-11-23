@@ -9,6 +9,7 @@ Thematic Guides
    configuration
    cameras
    evaluation
+   preview
    timeline
    deep_dive
    vulkan_backend

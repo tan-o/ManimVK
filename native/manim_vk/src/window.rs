@@ -4,6 +4,9 @@
 //! window only receives the finished RGBA frame and presents it through
 //! wgpu's Vulkan backend.  Keeping presentation separate means preview never
 //! changes the pixels that get written to disk.
+//!
+//! Keyboard, mouse and wheel input is queued on the window thread and drained
+//! by Python with `poll_events`, which drives the preview session's controls.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,8 +17,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::Key;
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
@@ -23,6 +27,67 @@ use winit::window::{Fullscreen, Window, WindowId};
 enum UserEvent {
     Frame,
     Close,
+}
+
+/// Input for Python, in frame-buffer pixel coordinates.
+#[derive(Clone, Debug)]
+enum InputEvent {
+    Key {
+        name: String,
+        pressed: bool,
+        repeat: bool,
+    },
+    Mouse {
+        button: String,
+        pressed: bool,
+    },
+    Cursor {
+        x: f64,
+        y: f64,
+    },
+    Scroll {
+        dx: f64,
+        dy: f64,
+    },
+}
+
+impl InputEvent {
+    fn into_py(self, py: Python<'_>) -> PyResult<PyObject> {
+        let object = match self {
+            InputEvent::Key {
+                name,
+                pressed,
+                repeat,
+            } => ("key", name, pressed, repeat).into_pyobject(py)?.into_any(),
+            InputEvent::Mouse { button, pressed } => {
+                ("mouse", button, pressed).into_pyobject(py)?.into_any()
+            }
+            InputEvent::Cursor { x, y } => ("cursor", x, y).into_pyobject(py)?.into_any(),
+            InputEvent::Scroll { dx, dy } => ("scroll", dx, dy).into_pyobject(py)?.into_any(),
+        };
+        Ok(object.unbind())
+    }
+}
+
+/// Key names as Python sees them: characters as typed ("r", "1"), named keys
+/// as their lowercase winit name ("space", "arrowleft", "escape").
+fn key_name(key: &Key) -> Option<String> {
+    match key {
+        Key::Named(named) => Some(format!("{named:?}").to_ascii_lowercase()),
+        Key::Character(text) => Some(text.to_lowercase()),
+        _ => None,
+    }
+}
+
+fn button_name(button: MouseButton) -> String {
+    match button {
+        MouseButton::Left => "left".into(),
+        MouseButton::Right => "right".into(),
+        MouseButton::Middle => "middle".into(),
+        MouseButton::Back => "back".into(),
+        MouseButton::Forward => "forward".into(),
+        MouseButton::Other(code) => format!("button{code}"),
+    }
 }
 
 /// Map Manim's Y/X position spellings (``UR``, ``LEFT``, ``0,0``) to a
@@ -89,13 +154,25 @@ struct PreviewApp {
     pending: Arc<Mutex<Option<Vec<u8>>>>,
     adapter_name: Arc<Mutex<String>>,
     error: Arc<Mutex<Option<String>>>,
+    events: Arc<Mutex<Vec<InputEvent>>>,
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
 }
 
 impl PreviewApp {
+    fn push(&self, event: InputEvent) {
+        if let Ok(mut queue) = self.events.lock() {
+            // A stalled Python side must not grow the queue without bound.
+            if queue.len() < 4096 {
+                queue.push(event);
+            }
+        }
+    }
+
     fn redraw(&mut self) {
-        let Some(pixels) = self.pixels.as_mut() else { return };
+        let Some(pixels) = self.pixels.as_mut() else {
+            return;
+        };
         let frame = self.pending.lock().ok().and_then(|mut slot| slot.take());
         if let Some(frame) = frame {
             if frame.len() == pixels.frame().len() {
@@ -128,7 +205,9 @@ impl ApplicationHandler<UserEvent> for PreviewApp {
         if self.fullscreen {
             attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(monitor.clone())));
         } else if let Some(monitor) = monitor.as_ref() {
-            if let Some(position) = initial_position(monitor, self.width, self.height, &self.position) {
+            if let Some(position) =
+                initial_position(monitor, self.width, self.height, &self.position)
+            {
                 attributes = attributes.with_position(position);
             }
         }
@@ -209,6 +288,39 @@ impl ApplicationHandler<UserEvent> for PreviewApp {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(name) = key_name(&event.logical_key) {
+                    self.push(InputEvent::Key {
+                        name,
+                        pressed: event.state == ElementState::Pressed,
+                        repeat: event.repeat,
+                    });
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => self.push(InputEvent::Mouse {
+                button: button_name(button),
+                pressed: state == ElementState::Pressed,
+            }),
+            WindowEvent::CursorMoved { position, .. } => {
+                // Window pixels to frame pixels (the frame is scaled to fit).
+                let (x, y) = match self.pixels.as_ref() {
+                    Some(pixels) => {
+                        match pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
+                            Ok((x, y)) => (x as f64, y as f64),
+                            Err((x, y)) => (x as f64, y as f64),
+                        }
+                    }
+                    None => (position.x, position.y),
+                };
+                self.push(InputEvent::Cursor { x, y });
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(dx, dy) => (dx as f64, dy as f64),
+                    MouseScrollDelta::PixelDelta(p) => (p.x / 40.0, p.y / 40.0),
+                };
+                self.push(InputEvent::Scroll { dx, dy });
+            }
             _ => {}
         }
     }
@@ -226,6 +338,7 @@ pub struct NativeWindow {
     pending: Arc<Mutex<Option<Vec<u8>>>>,
     adapter_name: Arc<Mutex<String>>,
     error: Arc<Mutex<Option<String>>>,
+    events: Arc<Mutex<Vec<InputEvent>>>,
     width: u32,
     height: u32,
     thread: Option<JoinHandle<()>>,
@@ -245,18 +358,22 @@ impl NativeWindow {
         adapter_name: &str,
     ) -> PyResult<Self> {
         if width == 0 || height == 0 {
-            return Err(PyValueError::new_err("preview window size must be positive"));
+            return Err(PyValueError::new_err(
+                "preview window size must be positive",
+            ));
         }
         let closing = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(None));
         let adapter_name_shared = Arc::new(Mutex::new(String::new()));
         let error = Arc::new(Mutex::new(None));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = std::sync::mpsc::channel::<Result<EventLoopProxy<UserEvent>, String>>();
 
         let thread_closing = closing.clone();
         let thread_pending = pending.clone();
         let thread_adapter_name = adapter_name_shared.clone();
         let thread_error = error.clone();
+        let thread_events = events.clone();
         let thread_title = title.to_owned();
         let thread_position = position.to_owned();
         let thread_requested_adapter = adapter_name.to_owned();
@@ -298,6 +415,7 @@ impl NativeWindow {
                     pending: thread_pending,
                     adapter_name: thread_adapter_name,
                     error: thread_error,
+                    events: thread_events,
                     window: None,
                     pixels: None,
                 };
@@ -315,7 +433,9 @@ impl NativeWindow {
             }
             Err(error) => {
                 let _ = handle.join();
-                return Err(PyRuntimeError::new_err(format!("preview thread setup: {error}")));
+                return Err(PyRuntimeError::new_err(format!(
+                    "preview thread setup: {error}"
+                )));
             }
         };
 
@@ -325,6 +445,7 @@ impl NativeWindow {
             pending,
             adapter_name: adapter_name_shared,
             error,
+            events,
             width,
             height,
             thread: Some(handle),
@@ -349,6 +470,17 @@ impl NativeWindow {
             .send_event(UserEvent::Frame)
             .map_err(|_| PyRuntimeError::new_err("preview window is closed"))?;
         Ok(())
+    }
+
+    /// Drain the input received since the last call, oldest first, as tuples:
+    /// `("key", name, pressed, repeat)`, `("mouse", button, pressed)`,
+    /// `("cursor", x, y)` in frame pixels, and `("scroll", dx, dy)` in lines.
+    fn poll_events(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        let drained: Vec<InputEvent> = match self.events.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(_) => return Err(PyRuntimeError::new_err("preview input lock poisoned")),
+        };
+        drained.into_iter().map(|event| event.into_py(py)).collect()
     }
 
     fn adapter_name(&self) -> String {
@@ -384,4 +516,3 @@ impl Drop for NativeWindow {
         self.close();
     }
 }
-
