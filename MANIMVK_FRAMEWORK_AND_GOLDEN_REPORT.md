@@ -3,8 +3,11 @@
 日期：2026-11-23  
 仓库：`C:\Users\Feysen\Work\Deepseek\ManimVK`  
 远端：`https://github.com/tan-o/ManimVK`  
-当前 `master`：`bf06d86`（`vulkan-strip` 已合并并推送），其上有本地修复提交（尚未推送）  
+当前 `master`：`d50f33b`（`vulkan-strip` + 3D bundle 已合并并推送）  
 本轮性质：审查后的 golden 全量对照 + 根因修复；不是只留一个 Cairo 基线等人接手。
+
+> 后续 bundle 合并、图像 FAIL 修复、毛球动画实跑的结果见  
+> `MANIMVK_BUNDLE_MERGE_AND_HAIRY_BALL_REPORT.md`。本文第 0/4/5 节的数量是 bundle 之前的状态。
 
 ---
 
