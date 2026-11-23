@@ -7,12 +7,14 @@
 mod window;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use ash::vk;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, Data, Font, FontMgr, FontStyle,
@@ -807,6 +809,13 @@ struct SkiaTarget {
     matrix_ty: f32,
     hsb_effect: Option<RuntimeEffect>,
     design3_effect: Option<RuntimeEffect>,
+    /// GPU snapshot of the static mobjects of the current play.
+    static_layer: Option<Image>,
+    /// Camera background image, uploaded once per image.
+    background_layer: Option<Image>,
+    /// Background-image fills keyed by the caller's cache key (the id of a
+    /// cached, read-only image-file array), so each file is uploaded once.
+    fill_images: HashMap<u64, Image>,
 }
 
 impl SkiaTarget {
@@ -856,7 +865,59 @@ impl SkiaTarget {
             matrix_ty: 0.0,
             hsb_effect: None,
             design3_effect: None,
+            static_layer: None,
+            background_layer: None,
+            fill_images: HashMap::new(),
         })
+    }
+
+    /// Replace every pixel of the surface with `image` at device scale.
+    fn blit_full(surface: &mut skia_safe::Surface, image: &Image) {
+        let mut paint = Paint::default();
+        paint.set_blend_mode(BlendMode::Src);
+        let canvas = surface.canvas();
+        canvas.save();
+        canvas.reset_matrix();
+        canvas.draw_image_with_sampling_options(
+            image,
+            (0, 0),
+            SamplingOptions::default(),
+            Some(&paint),
+        );
+        canvas.restore();
+    }
+
+    /// Build an RGBA8 unpremultiplied raster image from a C-contiguous buffer.
+    /// Drawing it on the Ganesh canvas uploads it once; Skia caches the texture
+    /// for as long as the returned `Image` is alive.
+    fn raster_image(
+        pixels: &Bound<PyAny>,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Image> {
+        let buffer = PyBuffer::<u8>::get(pixels)
+            .map_err(|error| PyValueError::new_err(format!("pixel buffer: {error}")))?;
+        let expected = (width * height * 4) as usize;
+        if buffer.item_count() != expected {
+            return Err(PyValueError::new_err(format!(
+                "pixel buffer has {} bytes, expected {expected}",
+                buffer.item_count()
+            )));
+        }
+        let slice = buffer
+            .as_slice(pixels.py())
+            .ok_or_else(|| PyValueError::new_err("pixel buffer must be C-contiguous"))?;
+        // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8 and the buffer
+        // stays alive (held by `buffer`) for the duration of the copy below.
+        let bytes = unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, expected) };
+        let info = SkImageInfo::new(
+            (width as i32, height as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        Image::from_raster_data(&info, Data::new_copy(bytes), (width * 4) as usize)
+            .ok_or_else(|| PyRuntimeError::new_err("Skia Image::from_raster_data failed"))
     }
 }
 
@@ -927,6 +988,90 @@ impl SkiaTarget {
 
     fn close_path(&mut self) {
         self.path.close();
+    }
+
+    /// Replace the current path with a whole cubic-Bezier path in one call.
+    ///
+    /// `points` is a C-contiguous float64 array of shape (n, k), k >= 2, in
+    /// scene coordinates (the canvas matrix maps them to pixels).  Each entry
+    /// of `subpaths` is (start, end, closed): points start..end form anchors
+    /// and handles a0 h0 h1 a1 a1' h ... with four points per curve, exactly
+    /// as Cairo's move_to/curve_to loop consumes them.
+    fn set_cubic_path(
+        &mut self,
+        points: &Bound<PyAny>,
+        subpaths: Vec<(usize, usize, bool)>,
+    ) -> PyResult<()> {
+        let buffer = PyBuffer::<f64>::get(points)
+            .map_err(|error| PyValueError::new_err(format!("path points: {error}")))?;
+        let shape = buffer.shape().to_vec();
+        if shape.len() != 2 || shape[1] < 2 {
+            return Err(PyValueError::new_err("path points must have shape (n, 2+)"));
+        }
+        let (count, stride) = (shape[0], shape[1]);
+        let data = buffer
+            .as_slice(points.py())
+            .ok_or_else(|| PyValueError::new_err("path points must be C-contiguous"))?;
+        let at = |index: usize| {
+            Point::new(
+                data[index * stride].get() as f32,
+                data[index * stride + 1].get() as f32,
+            )
+        };
+        self.path.reset();
+        for (start, end, closed) in subpaths {
+            if end > count || end < start + 4 {
+                continue;
+            }
+            self.path.move_to(at(start));
+            let mut index = start;
+            while index + 4 <= end {
+                self.path.cubic_to(at(index + 1), at(index + 2), at(index + 3));
+                index += 4;
+            }
+            if closed {
+                self.path.close();
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the surface as it is now as this play's static background.  The
+    /// snapshot stays on the GPU: no flush, no readback, no upload.
+    fn capture_static_layer(&mut self) {
+        self.static_layer = Some(self.surface.image_snapshot());
+    }
+
+    fn clear_static_layer(&mut self) {
+        self.static_layer = None;
+    }
+
+    /// Overwrite the surface with the static background.  Returns false when
+    /// none is captured, so the caller clears to the camera background.
+    fn restore_static_layer(&mut self) -> bool {
+        match self.static_layer.as_ref() {
+            Some(image) => {
+                Self::blit_full(&mut self.surface, image);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Upload a full-target camera background image (once per image).
+    fn set_background_layer(&mut self, pixels: &Bound<PyAny>) -> PyResult<()> {
+        self.background_layer = Some(Self::raster_image(pixels, self.width, self.height)?);
+        Ok(())
+    }
+
+    /// Overwrite the surface with the camera background image.
+    fn draw_background_layer(&mut self) -> PyResult<()> {
+        let image = self
+            .background_layer
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("no background layer was set"))?;
+        Self::blit_full(&mut self.surface, image);
+        Ok(())
     }
 
     fn set_source_rgba(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
@@ -1127,10 +1272,8 @@ impl SkiaTarget {
         if quad.len() != 4 {
             return Err(PyValueError::new_err("target quad needs four corners"));
         }
-        source
-            .context
-            .flush_and_submit()
-            .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
+        // Both surfaces belong to the one DirectContext, which orders the
+        // source's pending draws before this read; no flush is needed.
         let image = source.surface.image_snapshot();
         let shader = image
             .to_shader(
@@ -1240,22 +1383,21 @@ impl SkiaTarget {
     /// Fill the current path with a full-target background image.  The local
     /// matrix maps the path's scene coordinates onto the image's device pixels,
     /// keeping the mask and background on the GPU.
-    fn fill_path_with_image(&mut self, pixels: Vec<u8>) -> PyResult<()> {
-        if pixels.len() != (self.width * self.height * 4) as usize {
-            return Err(PyValueError::new_err("background pixel buffer has the wrong size"));
-        }
-        let info = SkImageInfo::new(
-            (self.width as i32, self.height as i32),
-            ColorType::RGBA8888,
-            AlphaType::Unpremul,
-            None,
-        );
-        let image = Image::from_raster_data(
-            &info,
-            Data::new_copy(pixels.as_slice()),
-            (self.width * 4) as usize,
-        )
-        .ok_or_else(|| PyRuntimeError::new_err("Skia background image failed"))?;
+    /// `key` identifies an immutable pixel source (a cached image file) whose
+    /// upload is kept; pass None for pixels that may change between calls.
+    #[pyo3(signature = (pixels, key=None))]
+    fn fill_path_with_image(&mut self, pixels: &Bound<PyAny>, key: Option<u64>) -> PyResult<()> {
+        let image = match key {
+            Some(key) => match self.fill_images.get(&key) {
+                Some(image) => image.clone(),
+                None => {
+                    let image = Self::raster_image(pixels, self.width, self.height)?;
+                    self.fill_images.insert(key, image.clone());
+                    image
+                }
+            },
+            None => Self::raster_image(pixels, self.width, self.height)?,
+        };
         let local = Matrix::new_all(
             self.matrix_sx,
             0.0,
@@ -1514,8 +1656,6 @@ half4 main(float2 fragCoord) {
     /// the temporary Rust vector and the second Python-side copy done by
     /// ``commit()``.
     fn commit_into(&mut self, target: &Bound<PyAny>) -> PyResult<()> {
-        use pyo3::buffer::PyBuffer;
-
         self.context
             .flush_and_submit()
             .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
@@ -1550,29 +1690,31 @@ half4 main(float2 fragCoord) {
         Ok(())
     }
 
-    /// Upload host RGBA pixels into the GPU surface. Used after CPU compositing
-    /// of point clouds or image mobjects.
-    fn load_pixels(&mut self, pixels: Vec<u8>) -> PyResult<()> {
-        if pixels.len() != (self.width * self.height * 4) as usize {
+    /// Upload host RGBA pixels into the GPU surface.  Reads the caller's
+    /// C-contiguous buffer in place; the draw is submitted with the frame.
+    fn load_pixels(&mut self, pixels: &Bound<PyAny>) -> PyResult<()> {
+        let buffer = PyBuffer::<u8>::get(pixels)
+            .map_err(|error| PyValueError::new_err(format!("pixel buffer: {error}")))?;
+        let expected = (self.width * self.height * 4) as usize;
+        if buffer.item_count() != expected {
             return Err(PyValueError::new_err("pixel buffer has the wrong size"));
         }
+        let slice = buffer
+            .as_slice(pixels.py())
+            .ok_or_else(|| PyValueError::new_err("pixel buffer must be C-contiguous"))?;
+        // SAFETY: see raster_image; Skia only reads from the slice.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected)
+        };
         let info = SkImageInfo::new(
             (self.width as i32, self.height as i32),
             ColorType::RGBA8888,
             AlphaType::Unpremul,
             None,
         );
-        let mut pixels = pixels;
-        let pixmap = skia_safe::Pixmap::new(
-            &info,
-            pixels.as_mut_slice(),
-            (self.width * 4) as usize,
-        )
-        .ok_or_else(|| PyRuntimeError::new_err("Skia Pixmap::new failed"))?;
+        let pixmap = skia_safe::Pixmap::new(&info, bytes, (self.width * 4) as usize)
+            .ok_or_else(|| PyRuntimeError::new_err("Skia Pixmap::new failed"))?;
         self.surface.write_pixels_from_pixmap(&pixmap, (0, 0));
-        self.context
-            .flush_and_submit()
-            .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
         Ok(())
     }
 }

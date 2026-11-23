@@ -188,7 +188,7 @@ class _TargetDrawer(_Drawer):
             # After a frozen wait, the background of still mobjects stays, so that
             # a frame drawn between plays (see Manager._render_preview_frame) shows
             # the still mobjects too. The next play draws a new background.
-            self._manager.renderer.static_image = None  # type: ignore[union-attr]
+            self._manager.renderer.discard_static_frame()  # type: ignore[union-attr]
         self._prepared = False
 
 

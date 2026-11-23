@@ -33,6 +33,7 @@ from typing_extensions import (
 from manim import config, logger
 from manim.constants import *
 from manim.data_structures import MethodWithArgs
+from manim.mobject.mobject import _updater_uses_dt
 from manim.typing import (
     Point3D,
     Point3D_Array,
@@ -1662,7 +1663,7 @@ class OpenGLMobject:
         call_updater: bool = False,
     ) -> Self:
         updater_list: list[_TimeBasedUpdater] | list[_NonTimeBasedUpdater]
-        if "dt" in inspect.signature(update_function).parameters:
+        if _updater_uses_dt(update_function):
             updater_list = self.time_based_updaters
         else:
             updater_list = self.non_time_updaters

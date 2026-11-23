@@ -217,8 +217,16 @@ class SkiaRenderer(CairoRenderer):
         *,
         excluded_mobjects: list[Mobject] | None = None,
     ) -> None:
-        """Draw classic mobjects and then any public ``Mesh`` objects."""
-        if mobjects is None:
+        """Draw classic mobjects and then any public ``Mesh`` objects.
+
+        A frame starts from the play's static layer, which stays on the GPU,
+        instead of uploading the static image as the Cairo renderer copies it.
+        """
+        self._ensure_open()
+        if self.skip_animations and not ignore_skipping:
+            return
+        self._final_scene = None
+        if not mobjects:
             mobjects = list_update(scene.mobjects, scene.foreground_mobjects)
         classic_mobjects: list[Mobject] = []
         mesh_roots: list[Any] = []
@@ -233,23 +241,43 @@ class SkiaRenderer(CairoRenderer):
             if mesh not in mesh_roots:
                 mesh_roots.append(mesh)
 
-        super().update_frame(
-            scene,
-            classic_mobjects,
-            include_submobjects,
-            ignore_skipping,
+        target = self._get_target()
+        if not target.restore_static_layer():
+            target.reset(self.camera)
+        self._draw_frame(
+            camera=self.camera,
+            mobjects=classic_mobjects,
+            include_submobjects=include_submobjects,
             excluded_mobjects=excluded_mobjects,
         )
-        if self.skip_animations and not ignore_skipping:
-            return
         if mesh_roots:
             from .mesh import draw_meshes
 
-            draw_meshes(
-                mesh_roots,
-                camera=self.camera,
-                target=self._get_target(),
-            )
+            draw_meshes(mesh_roots, camera=self.camera, target=target)
+
+    def save_static_frame_data(
+        self,
+        scene: Scene,
+        static_mobjects: Iterable[Mobject],
+    ) -> None:
+        """Draw the play's static mobjects once and keep them on the GPU."""
+        self._ensure_open()
+        self.discard_static_frame()
+        # Same rule as the Cairo renderer: nested camera views can show any
+        # moving mobject, so such a play draws everything every frame.
+        self._render_all_mobjects = (
+            isinstance(self.camera, MultiCamera)
+            and bool(self.camera.image_mobjects_from_cameras)
+            and bool(scene.moving_mobjects)
+        )
+        if self._render_all_mobjects or not static_mobjects:
+            return
+        self.update_frame(scene, mobjects=static_mobjects)
+        self._get_target().capture_static_layer()
+
+    def discard_static_frame(self) -> None:
+        if self._target is not None and not self._target._closed:
+            self._target.clear_static_layer()
 
     def _present_frame(self, scene: Scene, frame_offset: float) -> None:
         if self.window is not None:
@@ -280,7 +308,7 @@ class SkiaRenderer(CairoRenderer):
         output = self.file_writer.output_spec
         if self.num_plays and (output.is_video or output.is_image_sequence):
             self.file_writer.finish()
-        self.static_image = None
+        self.discard_static_frame()
         self._final_scene = scene
         if output.is_still or (
             not self.num_plays
