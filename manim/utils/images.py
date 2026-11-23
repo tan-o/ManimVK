@@ -7,8 +7,10 @@ __all__ = [
     "drag_pixels",
     "invert_image",
     "change_to_rgba_array",
+    "new_texture_key",
 ]
 
+import itertools
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
@@ -22,6 +24,19 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from manim.typing import PixelArray, RGBAPixelArray, RGBPixelArray
+
+
+_texture_keys = itertools.count(1)
+
+
+def new_texture_key() -> int:
+    """A process-unique number naming one immutable pixel array.
+
+    The renderer keeps a GPU texture per key, so the owner of a read-only
+    array takes a new key whenever it replaces the array; drawing with the
+    same key again reuses the upload.
+    """
+    return next(_texture_keys)
 
 
 def get_full_raster_image_path(image_file_name: str | PurePath) -> Path:

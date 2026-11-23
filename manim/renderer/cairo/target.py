@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from manim.utils.color import color_to_int_rgba
-from manim.utils.images import get_full_raster_image_path
+from manim.utils.images import get_full_raster_image_path, new_texture_key
 
 if TYPE_CHECKING:
     from manim.typing import RGBAPixelArray
@@ -69,6 +69,8 @@ class _ImageFiles:
 
     def __init__(self) -> None:
         self._images: dict[tuple[str, tuple[int, int]], RGBAPixelArray] = {}
+        # Texture keys of the cached arrays by their id, valid while cached.
+        self._keys: dict[int, int] = {}
 
     def get(
         self, image: Image.Image | Path | str, size: tuple[int, int]
@@ -82,11 +84,19 @@ class _ImageFiles:
         if cached is None:
             cached = self._images[key] = _rgba_image(image, size)
             cached.flags.writeable = False
+            self._keys[id(cached)] = new_texture_key()
         return cached
+
+    def texture_key(self, pixels: RGBAPixelArray) -> int | None:
+        """The texture key of an array returned by :meth:`get`, or None when
+        the array is not cached (it came from an image object).
+        """
+        return self._keys.get(id(pixels))
 
     def clear(self) -> None:
         """Forget the images read so far."""
         self._images.clear()
+        self._keys.clear()
 
 
 class _CairoRenderTarget:

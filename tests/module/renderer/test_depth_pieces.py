@@ -97,7 +97,8 @@ def test_textured_surface_atlas_holds_day_night_and_white(tmp_path):
     Image.new("RGB", (8, 4), (10, 200, 30)).save(day)
     Image.new("RGB", (16, 8), (5, 5, 50)).save(night)
     earth = TexturedSurface(Sphere(resolution=(6, 3)), day, night)
-    atlas = earth.get_texture_atlas()
+    atlas, key = earth.get_texture_atlas()
+    assert key == earth.get_texture_atlas()[1]
     assert not atlas.flags.writeable
     assert atlas.shape[1] == 8
     assert tuple(atlas[0, 0]) == (10, 200, 30, 255)

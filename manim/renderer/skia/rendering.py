@@ -174,9 +174,9 @@ class SkiaDrawingContext(_CairoDrawingContext):
                     )
                 )
             self.target.get_context(self.camera)
-            texture = surface.get_texture_atlas()
+            texture, key = surface.get_texture_atlas()
             self.target.draw_textured_mesh(
-                id(texture),
+                key,
                 texture,
                 np.ascontiguousarray(positions[:, :2], dtype=np.float32),
                 np.ascontiguousarray(uvs, dtype=np.float32),
@@ -335,38 +335,30 @@ class SkiaDrawingContext(_CairoDrawingContext):
             self._draw_image_mobject_native(image_mobject)
 
     def _draw_image_mobject_native(self, image_mobject) -> None:
-        source = (
-            self.image_resolver(image_mobject)
-            if isinstance(image_mobject, ImageMobjectFromCamera)
-            else image_mobject.get_pixel_array()
-        )
-        if source is None:
-            return
-        target_coords = self._points_to_subpixel_coords(
-            image_mobject,
-            image_mobject.points,
-        )
+        target_coords = self._points_to_subpixel_coords(image_mobject, image_mobject.points)
         # ImageMobject points are top-left, top-right, bottom-left, bottom-right.
-        corners = [
-            target_coords[0],
-            target_coords[1],
-            target_coords[3],
-            target_coords[2],
-        ]
-        quad = [(float(x), float(y)) for x, y in corners]
-        from manim.renderer.skia.target import SkiaRenderTarget
+        quad = [(float(x), float(y)) for x, y in target_coords[[0, 1, 3, 2]]]
+        sampling = _SAMPLING.get(image_mobject.resampling_algorithm, 2)
+        if isinstance(image_mobject, ImageMobjectFromCamera):
+            from manim.renderer.skia.target import SkiaRenderTarget
 
-        if isinstance(source, SkiaRenderTarget):
-            self.target.draw_target_quad(source, quad, 1.0)
+            source = self.image_resolver(image_mobject)
+            if isinstance(source, SkiaRenderTarget):
+                self.target.draw_target_quad(source, quad, 1.0)
+            elif source is not None:
+                self.target.draw_image_quad(None, source, quad, 1.0, sampling)
             return
-        source_pixels = np.ascontiguousarray(source, dtype=np.uint8)
-        if source_pixels.ndim != 3 or source_pixels.shape[2] != 4:
-            return
+        # The source pixels keep their GPU texture across frames; opacity and
+        # a transform into another image are applied while drawing.
+        mix = image_mobject.get_image_mix()
+        if mix is not None:
+            pixels, key, alpha = mix
+            mix = (key, pixels, alpha)
         self.target.draw_image_quad(
-            source_pixels.tobytes(),
-            source_pixels.shape[1],
-            source_pixels.shape[0],
+            image_mobject.texture_key,
+            image_mobject.pixel_array,
             quad,
-            1.0,
-            _SAMPLING.get(image_mobject.resampling_algorithm, 2),
+            image_mobject.get_opacity(),
+            sampling,
+            mix,
         )

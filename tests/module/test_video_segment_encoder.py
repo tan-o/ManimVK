@@ -42,7 +42,7 @@ def test_write_frame_owns_repeat_and_segment_local_pts(tmp_path):
     stream = Mock()
 
     def encode(frame):
-        encoded_frames.append(frame)
+        encoded_frames.append((frame.pts, frame.time_base))
         return [packet]
 
     stream.encode.side_effect = encode
@@ -51,8 +51,8 @@ def test_write_frame_owns_repeat_and_segment_local_pts(tmp_path):
 
     encoder.write_frame(_frame(), repeat=3)
 
-    assert [frame.pts for frame in encoded_frames] == [0, 1, 2]
-    assert [frame.time_base for frame in encoded_frames] == [Fraction(1, 30)] * 3
+    assert [pts for pts, _ in encoded_frames] == [0, 1, 2]
+    assert [time_base for _, time_base in encoded_frames] == [Fraction(1, 30)] * 3
     assert encoder._next_pts == 3
     assert container.mux.call_args_list == [call(packet)] * 3
 
@@ -198,3 +198,60 @@ def test_open_failure_has_target_profile_and_original_cause(tmp_path, monkeypatc
         VideoSegmentEncoder(target=tmp_path / "segment.mp4", spec=_spec())
 
     assert exc_info.value.__cause__ is expected_exception
+
+
+def _decode_first(path):
+    container = av.open(path)
+    context = container.streams.video[0].codec_context
+    frame = next(container.decode(video=0))
+    tags = (
+        context.colorspace,
+        context.color_primaries,
+        context.color_trc,
+        context.color_range,
+    )
+    planes = frame.to_ndarray()
+    container.close()
+    return tags, planes
+
+
+def test_yuv420p_streams_are_bt709_and_tagged(tmp_path):
+    from manim.scene.video_segment_encoder import YUV420Frame
+
+    target = tmp_path / "rgba.mp4"
+    encoder = VideoSegmentEncoder(target=target, spec=_spec(width=16, height=16))
+    red = np.zeros((16, 16, 4), dtype=np.uint8)
+    red[..., 0] = red[..., 3] = 255
+    encoder.write_frame(red, repeat=2)
+    encoder.finish()
+    tags, planes = _decode_first(target)
+    assert tags == (1, 1, 13, 1)
+    # BT.709 limited luma of pure red: 16 + 219 * 0.2126.
+    assert abs(int(planes[8, 8]) - 63) <= 1
+
+    target = tmp_path / "yuv.mp4"
+    encoder = VideoSegmentEncoder(target=target, spec=_spec(width=16, height=16))
+    data = np.empty((24, 16), dtype=np.uint8)
+    data[:16], data[16:20], data[20:] = 63, 102, 240
+    encoder.write_frame(YUV420Frame(data), repeat=2)
+    encoder.finish()
+    tags, planes = _decode_first(target)
+    assert tags == (1, 1, 13, 1)
+    assert abs(int(planes[8, 8]) - 63) <= 1
+
+
+def test_yuv420_frames_need_a_yuv420p_stream(tmp_path):
+    from manim.scene.video_segment_encoder import YUV420Frame
+
+    encoder = _detached_encoder(tmp_path)
+    encoder.spec = VideoEncoderSpec(
+        container_format="mov",
+        codec="qtrle",
+        pixel_format="argb",
+        width=4,
+        height=2,
+        frame_rate=Fraction(30, 1),
+        options=(),
+    )
+    with pytest.raises(ValueError, match="yuv420p"):
+        encoder.write_frame(YUV420Frame(np.zeros((3, 4), dtype=np.uint8)))

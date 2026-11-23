@@ -25,6 +25,16 @@ uv pip install --python ..\..\.venv\Scripts\python.exe --no-deps --reinstall `
 The extension is `abi3` for Python 3.11+.  A clean build downloads the Skia
 binary archive into the Cargo target directory.
 
+## Type-check without Skia binaries
+
+`skia-bindings` skips its native build and uses its pre-generated bindings
+when `DOCS_RS` is set, so the crate can be checked (not linked) on a machine
+without Skia's binaries, such as CI:
+
+```sh
+DOCS_RS=1 cargo clippy
+```
+
 ## Platform status
 
 - Windows x64: built and exercised in this repository.
@@ -33,6 +43,15 @@ binary archive into the Cargo target directory.
 - macOS: Vulkan requires MoltenVK; no prebuilt wheel or CI job is provided yet.
 
 ## Behaviour notes
+
+- Keyed textures (`textures.rs`): Python names every read-only pixel array
+  (image files, `ImageMobject` sources, mesh atlases) with a process-unique
+  key from `manim.utils.images.new_texture_key`.  The first draw uploads a
+  GPU texture; later draws reuse it.  A texture not drawn for two frames is
+  dropped.
+- Video frames are read with `request_yuv420` / `collect_yuv420_into`: Skia
+  converts to BT.709 I420 on the GPU and reads 1.5 bytes per pixel
+  asynchronously, so frame N is collected after frame N+1 is drawn.
 
 - One `Device` owns one Vulkan instance/device and one shared `DirectContext`.
   Targets created from it clone the context reference rather than creating a

@@ -27,7 +27,10 @@ from .rendering import SkiaDrawingContext
 from .target import SkiaRenderTarget
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from manim.scene.scene import Scene
+    from manim.scene.video_segment_encoder import YUV420Frame
     from manim.typing import RGBAPixelArray
 
 __all__ = ["SkiaRenderer"]
@@ -256,6 +259,18 @@ class SkiaRenderer(CairoRenderer):
             return
         self.update_frame(scene, mobjects=static_mobjects)
         self._get_target().capture_static_layer()
+
+    def request_yuv420_frame(self) -> Callable[[], YUV420Frame] | None:
+        """Start reading the current image as YUV 4:2:0, converted on the
+        GPU; see :meth:`.SkiaRenderTarget.request_yuv420`.
+
+        Only opaque frames convert: with a translucent background, alpha
+        decides what the encoder keeps, so the RGBA frame is read instead.
+        """
+        if self.camera.background_opacity < 1:
+            return None
+        self._draw_final_state()
+        return self._get_target().request_yuv420()
 
     def discard_static_frame(self) -> None:
         if self._target is not None and not self._target._closed:

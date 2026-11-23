@@ -15,7 +15,7 @@ from manim.mobject.mobject import Mobject
 from manim.mobject.three_d.three_dimensions import Surface
 from manim.utils.bezier import interpolate
 from manim.utils.color import ManimColor, ParsableManimColor, interpolate_color
-from manim.utils.images import get_full_raster_image_path
+from manim.utils.images import get_full_raster_image_path, new_texture_key
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -40,9 +40,9 @@ def _texture_atlas(
 
     Skia's ``drawVertices`` takes one shader, so one texture holds every
     layer a triangle is drawn with; vertex colours tint and fade each layer.
-    The array is kept for the process lifetime and is read-only, so its
-    ``id`` keys the GPU upload.  With no image this is the shared white
-    texture of every :class:`MeshSurface`.
+    The array is kept for the process lifetime and is read-only, and
+    ``layout["key"]`` names its GPU texture.  With no image this is the
+    shared white texture of every :class:`MeshSurface`.
     """
     regions: list[np.ndarray] = []
     if image_file is not None:
@@ -73,6 +73,7 @@ def _texture_atlas(
         "day": offsets[0] if image_file is not None else None,
         "night": offsets[1] if dark_image_file is not None else None,
         "white": offsets[-1] + _SOLID / 2,
+        "key": new_texture_key(),
     }
     return atlas, layout
 
@@ -181,8 +182,10 @@ class MeshSurface(Mobject):
     def _atlas_files(self) -> tuple[str | None, str | None]:
         return None, None
 
-    def get_texture_atlas(self) -> np.ndarray:
-        return _texture_atlas(*self._atlas_files())[0]
+    def get_texture_atlas(self) -> tuple[np.ndarray, int]:
+        """The read-only texture atlas and the key of its GPU texture."""
+        atlas, layout = _texture_atlas(*self._atlas_files())
+        return atlas, int(layout["key"])
 
     def get_depth_pieces(self) -> np.ndarray:
         """The corners of each triangle, shape ``(n, 3, 3)``."""

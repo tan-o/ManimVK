@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,6 +14,7 @@ from manim.renderer.cairo.target import (
     _CairoRenderTarget,
     _ImageFiles,
 )
+from manim.scene.video_segment_encoder import YUV420Frame
 
 if TYPE_CHECKING:
     from manim.camera import Camera
@@ -166,15 +168,39 @@ class SkiaRenderTarget(_CairoRenderTarget):
         return self._native
 
     def draw_image_quad(
-        self, pixels, width: int, height: int, quad, alpha: float, sampling: int = 2
+        self,
+        key: int | None,
+        pixels,
+        quad,
+        alpha: float,
+        sampling: int = 2,
+        mix=None,
     ) -> None:
         """Draw an RGBA image into a device-space quad on the GPU.
 
-        ``sampling`` is 0 (nearest), 1 (bilinear) or 2 (bicubic).
+        ``key`` names the read-only ``pixels`` (see
+        :func:`~.new_texture_key`): the GPU texture uploaded for a key is
+        reused while the key keeps being drawn.  Pass None for pixels that
+        change every frame.  ``sampling`` is 0 (nearest), 1 (bilinear) or
+        2 (bicubic).  ``mix``, ``(key, pixels, weight)``, blends a second
+        image of the same size over the first by ``weight``.
         """
         self._ensure_open()
+        pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
+        if pixels.ndim != 3 or pixels.shape[2] != 4:
+            return
+        if mix is not None:
+            mix_key, mix_pixels, weight = mix
+            mix = (mix_key, np.ascontiguousarray(mix_pixels, dtype=np.uint8), float(weight))
         self._native.draw_image_quad(
-            pixels, int(width), int(height), quad, float(alpha), int(sampling)
+            key,
+            pixels,
+            pixels.shape[1],
+            pixels.shape[0],
+            quad,
+            float(alpha),
+            int(sampling),
+            mix,
         )
         self._mark_gpu_written()
 
@@ -193,16 +219,16 @@ class SkiaRenderTarget(_CairoRenderTarget):
         """Make a full-frame background image, tinted by ``rgba``, the source
         of the next fills and strokes.
 
-        Read-only arrays are image files cached for the renderer's lifetime
-        (see ``_ImageFiles``), so their identity keys the GPU upload.  Other
-        arrays may change between frames: pass the same ``batch`` number for
-        every call that uses them in one batch, and they are uploaded once for
-        that batch.
+        Image files come from the renderer's ``_ImageFiles``, which gives them
+        texture keys, so each is uploaded once.  Other arrays may change
+        between frames: pass the same ``batch`` number for every call that
+        uses them in one batch, and they are uploaded once for that batch.
         """
         self._ensure_open()
         pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
-        if not pixels.flags.writeable:
-            self._native.set_source_image(pixels, *(float(c) for c in rgba), id(pixels))
+        key = self.image_files.texture_key(pixels)
+        if key is not None:
+            self._native.set_source_image(pixels, *(float(c) for c in rgba), key)
         else:
             self._native.set_source_image(
                 pixels, *(float(c) for c in rgba), batch, batch is not None
@@ -268,6 +294,30 @@ class SkiaRenderTarget(_CairoRenderTarget):
             # asks for commit().
             np.copyto(self._pixels, self._last_readback)
             self._last_readback = None
+
+    def request_yuv420(self) -> Callable[[], YUV420Frame] | None:
+        """Start reading the frame as BT.709 YUV 4:2:0, converted on the GPU.
+
+        Returns a function that waits for the read and returns the frame, or
+        None when the size is odd and 4:2:0 cannot hold it.  The read is
+        ordered before later drawing, so the next frame can be drawn before
+        the function is called; call it before the next request.
+        """
+        self._ensure_open()
+        settings = self.settings
+        if settings.pixel_width % 2 or settings.pixel_height % 2:
+            return None
+        # The surface always holds the frame: reset() clears it and
+        # set_pixels() loads it, so it is read whatever ``pixels`` holds.
+        ticket = self._native.request_yuv420()
+        shape = (settings.pixel_height * 3 // 2, settings.pixel_width)
+
+        def collect() -> YUV420Frame:
+            data = np.empty(shape, dtype=np.uint8)
+            self._native.collect_yuv420_into(ticket, data)
+            return YUV420Frame(data)
+
+        return collect
 
     def read_pixels(self) -> RGBAPixelArray:
         """Return a fresh top-left RGBA frame, reading directly into it.

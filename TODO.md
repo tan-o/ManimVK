@@ -38,14 +38,15 @@
 ## P2：性能
 
 - [ ] **updater 批量化**。1080p60 傅里叶仍约 `render=28.7s`，其中 Python `update_to_time` 16.9s，占 58.7%。
-- [ ] **异步回读**。`read_pixels` 仍约 5.9s，是同步 flush + 回读；需要 PBO/双缓冲，把回读与下一帧绘制/编码重叠。
+- [ ] **在真机上验收异步 YUV 回读**。已实现：视频帧走 Skia `asyncRescaleAndReadPixelsYUV420`，GPU 上转 BT.709 I420（每像素 1.5 字节而不是 4），第 N 帧在第 N+1 帧画完、提交前取回，回读和下一帧的 Python 工作重叠；编码器直接吃 YUV，省掉 swscale（沙箱 1080p 实测编码线程 20.4→13.2 ms/帧）。沙箱只有 CPU 模拟器，需要在 GPU 上量 `read_pixels` 的 5.9s 降到多少，并抽查颜色（成片已打 BT.709 标签）。
 - [ ] **display list / 原生场景图**。绘制仍按对象逐个提交，`draw≈5.1s`；对象数上千会线性放大。
-- [ ] **90fps 编码调优**。目前默认 `libx264 crf23`；需要实测 `preset=veryfast`、`h264_nvenc`、`max-inflight-encoders` 的真实收益，并记录画质/体积取舍。
+- [ ] **90fps 编码调优**。目前默认 `libx264 crf23`（输入已是 GPU 转好的 YUV）；沙箱 1080p 扁平画面 `preset=veryfast` 再快约 25%，体积反而略小。需要在真机上实测 `veryfast`、`h264_nvenc` 和 `max-inflight-encoders`，并记录画质/体积取舍。
 
 ## P3：工程化
 
 - [ ] **golden 进 CI**。把 30 个高风险场景做成 smoke，保留 PASS/REVIEW 基线，禁止 REVIEW 数量增长。
 - [ ] **Cairo/Skia 共享 conformance 层**。背景图逐像素遮罩、AA、采样仍是两套实现；`BasicUsage_2` 等 REVIEW 的根因在这里。
+- [ ] **CI 里对 `native/manim_vk` 做 `DOCS_RS=1 cargo clippy`**。不需要 Skia 二进制就能类型检查（见 `native/manim_vk/README.md`），可以挡住编译不过的提交。
 - [ ] **原生扩展版本检查**。`lib.rs` 变更后所有机器都必须重编译 `.pyd`；需要版本号校验或预编译 wheel，避免加载旧二进制。
 - [ ] **整理未跟踪产物**。`golden*`、`renders` 等测试输出不应进入仓库；需要明确 `.gitignore` 和归档策略。
 

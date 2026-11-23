@@ -11,7 +11,7 @@ from ..scene.audio_mixer import _Sound
 from .frames import frame_count
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from PIL.Image import Image
 
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..manager import Manager
     from ..mobject.mobject import Mobject, _AnimationBuilder
     from ..scene.scene import Scene
+    from ..scene.video_segment_encoder import YUV420Frame
     from ..typing import RGBAPixelArray
     from .cache import _SegmentCache
     from .mode import _RunMode
@@ -108,6 +109,16 @@ class _Frame:
             self._pixels = self._loop.drawer.pixels(self)
         return self._pixels
 
+    def request_yuv420(self) -> Callable[[], YUV420Frame] | None:
+        """Start reading the frame converted for a ``yuv420p`` video,
+        drawing it if needed; see :meth:`_Drawer.request_yuv420`.  None when
+        the drawer does not convert, or the RGBA pixels are read already.
+        """
+        if self._pixels is not None:
+            return None
+        self.draw()
+        return self._loop.drawer.request_yuv420(self)
+
     def image(self) -> Image:
         """Return the frame as a PIL image, drawing it if needed."""
         from PIL import Image
@@ -157,6 +168,14 @@ class _Drawer:
         """The pixels of ``frame``, which :meth:`draw` drew if it was called."""
         raise NotImplementedError
 
+    def request_yuv420(self, frame: _Frame) -> Callable[[], YUV420Frame] | None:
+        """Start reading ``frame``, drawn by :meth:`draw`, converted for a
+        ``yuv420p`` video.  Returns a function that finishes the read, which
+        may be called after the next frame is drawn; None when the drawer
+        does not convert.
+        """
+        return None
+
     def end_play(self, play: _Play) -> None:
         """The play's frames are drawn."""
 
@@ -181,6 +200,9 @@ class _TargetDrawer(_Drawer):
 
     def pixels(self, frame: _Frame) -> RGBAPixelArray:
         return self._manager.renderer.get_frame()
+
+    def request_yuv420(self, frame: _Frame) -> Callable[[], YUV420Frame] | None:
+        return self._manager.renderer.request_yuv420_frame()
 
     def end_play(self, play: _Play) -> None:
         if self._prepared and not play.frozen:

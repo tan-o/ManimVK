@@ -24,7 +24,11 @@ from ...utils.color import (
     ParsableManimColor,
     color_to_int_rgb,
 )
-from ...utils.images import change_to_rgba_array, get_full_raster_image_path
+from ...utils.images import (
+    change_to_rgba_array,
+    get_full_raster_image_path,
+    new_texture_key,
+)
 
 __all__ = ["ImageMobject", "ImageMobjectFromCamera"]
 
@@ -194,29 +198,78 @@ class ImageMobject(AbstractImageMobject):
     ) -> None:
         self.fill_opacity: float = 1
         self.stroke_opacity: float = 1
+        self.opacity: float = 1.0
         self.invert_image = invert
         self.image_mode = image_mode
         if isinstance(filename_or_array, (str, pathlib.PurePath)):
             path = get_full_raster_image_path(filename_or_array)
-            image = Image.open(path).convert(self.image_mode)
-            self.pixel_array = np.array(image)
+            pixels = np.array(Image.open(path).convert(self.image_mode))
             self.path = path
         else:
-            self.pixel_array = np.array(filename_or_array)
+            pixels = np.array(filename_or_array)
         self.pixel_array_dtype = kwargs.get("pixel_array_dtype", "uint8")
-        self.pixel_array = change_to_rgba_array(
-            self.pixel_array, self.pixel_array_dtype
-        )
+        pixels = change_to_rgba_array(pixels, self.pixel_array_dtype)
         if self.invert_image:
-            self.pixel_array[:, :, :3] = (
-                np.iinfo(self.pixel_array_dtype).max - self.pixel_array[:, :, :3]
-            )
-        self.orig_alpha_pixel_array = self.pixel_array[:, :, 3].copy()
+            pixels[:, :, :3] = np.iinfo(self.pixel_array_dtype).max - pixels[:, :, :3]
+        self.pixel_array = pixels
         super().__init__(scale_to_resolution, **kwargs)
 
+    @property
+    def pixel_array(self) -> PixelArray:
+        """The source pixels, read-only.
+
+        Assigning an array replaces the image (and its GPU texture).  Opacity
+        and a transform into another image are kept apart from the source and
+        applied when the image is drawn; :meth:`get_pixel_array` returns the
+        pixels with them applied.
+        """
+        return self._pixel_array
+
+    @pixel_array.setter
+    def pixel_array(self, pixels: PixelArray) -> None:
+        pixels = np.array(pixels, copy=None)
+        if pixels.flags.writeable or not pixels.flags.c_contiguous:
+            pixels = np.ascontiguousarray(pixels).copy()
+            pixels.flags.writeable = False
+        self._pixel_array = pixels
+        self.texture_key = new_texture_key()
+        self._image_mix: tuple[PixelArray, float] | None = None
+        self._image_mix_key: int | None = None
+
+    def __deepcopy__(self, clone_from_id: dict[int, Any]) -> Self:
+        # The pixel arrays are read-only: copies share them, and their textures.
+        clone_from_id.setdefault(id(self._pixel_array), self._pixel_array)
+        if self._image_mix is not None:
+            mix = self._image_mix[0]
+            clone_from_id.setdefault(id(mix), mix)
+        return super().__deepcopy__(clone_from_id)
+
+    def get_image_mix(self) -> tuple[PixelArray, int, float] | None:
+        """``(pixels, texture key, alpha)`` of the image this one is being
+        transformed into, drawn over it with weight ``alpha``, or None.
+        """
+        if self._image_mix is None:
+            return None
+        pixels, alpha = self._image_mix
+        return pixels, self._image_mix_key, alpha
+
+    def get_opacity(self) -> float:
+        return self.opacity
+
     def get_pixel_array(self) -> PixelArray:
-        """A simple getter method."""
-        return self.pixel_array
+        """The pixels as drawn: the source, mixed into the image it is being
+        transformed into, with the opacity applied to the alpha channel.
+        """
+        pixels = self._pixel_array
+        if self._image_mix is None and self.opacity == 1:
+            return pixels
+        if self._image_mix is not None:
+            other, alpha = self._image_mix
+            pixels = interpolate(pixels, other, alpha)
+        else:
+            pixels = pixels.astype(np.float64)
+        pixels[:, :, 3] *= self.opacity
+        return pixels.astype(self.pixel_array_dtype)
 
     def set_color(
         self,
@@ -224,10 +277,11 @@ class ImageMobject(AbstractImageMobject):
         alpha: Any = None,
         family: bool = True,
     ) -> Self:
-        rgb = color_to_int_rgb(color)
-        self.pixel_array[:, :, :3] = rgb
+        pixels = self._pixel_array.copy()
+        pixels[:, :, :3] = color_to_int_rgb(color)
         if alpha is not None:
-            self.pixel_array[:, :, 3] = int(255 * alpha)
+            pixels[:, :, 3] = int(255 * alpha)
+        self.pixel_array = pixels
         for submob in self.submobjects:
             submob.set_color(color, alpha, family)
         self.color = ManimColor(color)
@@ -242,7 +296,7 @@ class ImageMobject(AbstractImageMobject):
             The alpha value of the object, 1 being opaque and 0 being
             transparent.
         """
-        self.pixel_array[:, :, 3] = self.orig_alpha_pixel_array * alpha
+        self.opacity = float(alpha)
         self.stroke_opacity = alpha
         return self
 
@@ -264,8 +318,12 @@ class ImageMobject(AbstractImageMobject):
     def interpolate_color(
         self, mobject1: Mobject, mobject2: Mobject, alpha: float
     ) -> Self:
-        """Interpolates the array of pixel color values from one ImageMobject
-        into an array of equal size in the target ImageMobject.
+        """Interpolates the pixel colour values from one ImageMobject into
+        another of equal size.
+
+        Nothing is computed per pixel here: the opacity is interpolated, and
+        when the two images differ this one is drawn as the first with the
+        second blended over it by ``alpha``, on the GPU.
 
         Parameters
         ----------
@@ -286,21 +344,42 @@ class ImageMobject(AbstractImageMobject):
             f"Mobject 2 ({mobject2}) : {mobject2.pixel_array.shape}"
         )
         self.fill_opacity = interpolate(
-            mobject1.fill_opacity,
-            mobject2.fill_opacity,
-            alpha,
+            mobject1.fill_opacity, mobject2.fill_opacity, alpha
         )
         self.stroke_opacity = interpolate(
-            mobject1.stroke_opacity,
-            mobject2.stroke_opacity,
-            alpha,
+            mobject1.stroke_opacity, mobject2.stroke_opacity, alpha
         )
-        self.pixel_array = interpolate(
-            mobject1.pixel_array,
-            mobject2.pixel_array,
-            alpha,
-        ).astype(self.pixel_array_dtype)
+        self.opacity = float(interpolate(mobject1.opacity, mobject2.opacity, alpha))
+        start, end = mobject1, mobject2
+        if start._image_mix is not None or end._image_mix is not None:
+            # Interpolating between images that are themselves mid-transform
+            # has no two textures to blend: settle them on the CPU.
+            start = ImageMobject(start._mixed_source())
+            end = ImageMobject(end._mixed_source())
+        if self._pixel_array is not start._pixel_array:
+            self._pixel_array = start._pixel_array
+            self.texture_key = start.texture_key
+        if alpha == 0 or end.texture_key == start.texture_key:
+            self._image_mix = None
+            self._image_mix_key = None
+        elif alpha == 1:
+            self._pixel_array = end._pixel_array
+            self.texture_key = end.texture_key
+            self._image_mix = None
+            self._image_mix_key = None
+        else:
+            self._image_mix = (end._pixel_array, float(alpha))
+            self._image_mix_key = end.texture_key
         return self
+
+    def _mixed_source(self) -> PixelArray:
+        """The source mixed into the image it is being transformed into,
+        without the opacity.
+        """
+        other, alpha = self._image_mix
+        return interpolate(self._pixel_array, other, alpha).astype(
+            self.pixel_array_dtype
+        )
 
     def get_style(self) -> dict[str, Any]:
         return {

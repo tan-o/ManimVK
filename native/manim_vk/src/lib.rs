@@ -4,10 +4,11 @@
 //! context; `SkiaTarget` is a GPU render target that draws Manim's classic
 //! mobjects (paths, images, point clouds, SkSL effects) and reads frames back.
 
+mod textures;
 mod window;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,14 +18,16 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use skia_safe::gradient::{Colors as GradientColors, Gradient, Interpolation};
+use skia_safe::image::{AsyncReadResult, RescaleGamma, RescaleMode};
 use skia_safe::paint::{Cap, Join, Style};
 use skia_safe::runtime_effect::RuntimeShaderBuilder;
 use skia_safe::vertices::{VertexMode, Vertices};
 use skia_safe::{
     gpu, AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, CubicResampler, Data, FilterMode,
-    Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
-    RuntimeEffect, SamplingOptions, TileMode, M44,
+    IRect, Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
+    RuntimeEffect, SamplingOptions, TileMode, YUVColorSpace, M44,
 };
+use textures::TextureCache;
 
 struct DeviceInner {
     entry: ash::Entry,
@@ -40,7 +43,8 @@ struct DeviceInner {
 /// ``Device``.  ``context`` only holds a reference-counted pointer, so each
 /// target can clone it without creating a second Vulkan context.
 struct GpuShared {
-    backend: Box<gpu::vk::BackendContext<'static>>,
+    /// Never read: the context points into it, so it lives as long.
+    _backend: Box<gpu::vk::BackendContext<'static>>,
     context: gpu::DirectContext,
 }
 
@@ -256,7 +260,10 @@ fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
     });
     let context = gpu::direct_contexts::make_vulkan(&backend, None)
         .ok_or_else(|| PyRuntimeError::new_err("Skia make_vulkan returned None"))?;
-    Ok(Rc::new(GpuShared { backend, context }))
+    Ok(Rc::new(GpuShared {
+        _backend: backend,
+        context,
+    }))
 }
 
 fn skia_get_proc(inner: &DeviceInner, of: gpu::vk::GetProcOf) -> *const std::ffi::c_void {
@@ -288,7 +295,8 @@ fn skia_get_proc(inner: &DeviceInner, of: gpu::vk::GetProcOf) -> *const std::ffi
 /// A Skia Ganesh surface backed by the same Vulkan device as `Device`.
 #[pyclass(unsendable)]
 struct SkiaTarget {
-    inner: Arc<DeviceInner>,
+    /// Never read: keeps the Vulkan device alive while the surface exists.
+    _inner: Arc<DeviceInner>,
     _gpu: Rc<GpuShared>,
     width: u32,
     height: u32,
@@ -305,14 +313,19 @@ struct SkiaTarget {
     static_layer: Option<Image>,
     /// Camera background image, uploaded once per image.
     background_layer: Option<Image>,
-    /// Background-image fills keyed by the caller's cache key (the id of a
-    /// cached, read-only image-file array), so each file is uploaded once.
-    fill_images: HashMap<u64, Image>,
-    /// Mipmapped mesh textures keyed by the caller's cache key.
-    mesh_images: HashMap<u64, Image>,
+    /// Textures of keyed, immutable pixel arrays: image files, ImageMobject
+    /// sources and mesh atlases.
+    textures: TextureCache,
     /// The last transient background image (see `set_source_image`).
     transient_image: Option<(u64, Image)>,
+    /// YUV reads in flight, oldest first, by ticket.
+    yuv_reads: VecDeque<(u64, YuvSlot)>,
+    next_ticket: u64,
 }
+
+/// Where Skia's callback leaves a YUV read: unset until it is called, then
+/// the result, which is None when the read failed.
+type YuvSlot = Rc<RefCell<Option<Option<AsyncReadResult>>>>;
 
 impl SkiaTarget {
     fn new(inner: Arc<DeviceInner>, gpu: Rc<GpuShared>, width: u32, height: u32) -> PyResult<Self> {
@@ -337,7 +350,7 @@ impl SkiaTarget {
         )
         .ok_or_else(|| PyRuntimeError::new_err("Skia render_target returned None"))?;
         Ok(Self {
-            inner,
+            _inner: inner,
             _gpu: gpu,
             width,
             height,
@@ -356,9 +369,10 @@ impl SkiaTarget {
             matrix_ty: 0.0,
             static_layer: None,
             background_layer: None,
-            fill_images: HashMap::new(),
-            mesh_images: HashMap::new(),
+            textures: TextureCache::default(),
             transient_image: None,
+            yuv_reads: VecDeque::new(),
+            next_ticket: 0,
         })
     }
 
@@ -403,12 +417,73 @@ impl SkiaTarget {
             AlphaType::Unpremul,
             None,
         );
-        Image::from_raster_data(&info, Data::new_copy(bytes), (width * 4) as usize)
-            .ok_or_else(|| PyRuntimeError::new_err("Skia Image::from_raster_data failed"))
+        skia_safe::images::raster_from_data(&info, Data::new_copy(bytes), (width * 4) as usize)
+            .ok_or_else(|| PyRuntimeError::new_err("Skia images::raster_from_data failed"))
+    }
+
+    /// The texture for keyed pixels, or a one-off upload without a key.
+    fn texture(
+        &mut self,
+        key: Option<u64>,
+        pixels: &Bound<PyAny>,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Image> {
+        match key {
+            Some(key) => self.textures.get(&mut self.context, key, false, || {
+                Self::raster_image(pixels, width, height)
+            }),
+            None => Self::raster_image(pixels, width, height),
+        }
+    }
+
+    /// Draw `image` stretched over the device-space quad `corners` (top-left,
+    /// top-right, bottom-right, bottom-left) with the canvas's current matrix.
+    fn draw_image_vertices(
+        &mut self,
+        image: &Image,
+        corners: &[Point],
+        alpha: f32,
+        sampling: u8,
+        blend: BlendMode,
+    ) -> PyResult<()> {
+        let shader = image
+            .to_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                Self::image_sampling(sampling),
+                None,
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("Skia image shader failed"))?;
+        let (w, h) = (image.width() as f32, image.height() as f32);
+        let tex = [
+            Point::new(0.0, 0.0),
+            Point::new(w, 0.0),
+            Point::new(w, h),
+            Point::new(0.0, h),
+        ];
+        let order = [0, 1, 2, 0, 2, 3];
+        let positions = order.map(|index| corners[index]);
+        let tex_coords = order.map(|index| tex[index]);
+        let vertices = Vertices::new_copy(
+            VertexMode::Triangles,
+            &positions,
+            &tex_coords,
+            &[Color::WHITE; 6],
+            None,
+        );
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_shader(shader);
+        paint.set_alpha_f(alpha.clamp(0.0, 1.0));
+        paint.set_blend_mode(blend);
+        self.surface
+            .canvas()
+            .draw_vertices(&vertices, BlendMode::Modulate, &paint);
+        Ok(())
     }
 
     /// Image sampling for `ImageMobject.resampling_algorithm`: 0 nearest,
-    /// 1 bilinear, 2 bicubic (Catmull-Rom, as PIL's bicubic).
+    /// 1 bilinear, 2 bicubic (Catmull-Rom, as PIL's resize).
     fn image_sampling(sampling: u8) -> SamplingOptions {
         match sampling {
             0 => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
@@ -457,11 +532,9 @@ impl SkiaTarget {
     /// Set the user-to-device matrix. `sy` is the y scale; callers pass a
     /// negative value to flip Manim's y-up coordinates into Skia's y-down space.
     fn set_matrix(&mut self, sx: f32, sy: f32, tx: f32, ty: f32) {
-        let mut matrix = M44::new_identity();
-        matrix.set_row_major(&[
+        self.matrix = M44::row_major(&[
             sx, 0.0, 0.0, tx, 0.0, sy, 0.0, ty, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
-        self.matrix = matrix;
         self.matrix_sx = sx;
         self.matrix_sy = sy;
         self.matrix_tx = tx;
@@ -648,87 +721,69 @@ impl SkiaTarget {
         self.surface.canvas().draw_path(&path, &self.paint);
     }
 
-    /// Draw a raster RGBA image into an arbitrary device-space quad.  The
-    /// image is sampled by Skia's GPU pipeline, so no host-side compositing is
-    /// required for ``ImageMobject``.
-    /// `sampling` is 0 (nearest), 1 (bilinear) or 2 (bicubic).
+    /// Draw an RGBA image into an arbitrary device-space quad, sampled by
+    /// Skia's GPU pipeline.  `key` names immutable pixels whose texture is
+    /// kept across frames (see `textures`); None uploads `pixels` for this
+    /// draw only.  `sampling` is 0 (nearest), 1 (bilinear) or 2 (bicubic).
+    ///
+    /// `mix`, `(key, pixels, weight)` for a second image of the same size,
+    /// blends it over the first: inside a layer drawn with `alpha`, the
+    /// first image is added with weight `1 - weight` and the second with
+    /// `weight`, a premultiplied lerp of the two.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (key, pixels, image_width, image_height, quad, alpha, sampling, mix=None))]
     fn draw_image_quad(
         &mut self,
-        pixels: Vec<u8>,
+        key: Option<u64>,
+        pixels: &Bound<PyAny>,
         image_width: u32,
         image_height: u32,
         quad: Vec<(f32, f32)>,
         alpha: f32,
         sampling: u8,
+        mix: Option<(Option<u64>, PyObject, f32)>,
     ) -> PyResult<()> {
         if quad.len() != 4 {
             return Err(PyValueError::new_err("image quad needs four corners"));
         }
-        if image_width == 0
-            || image_height == 0
-            || pixels.len() != (image_width * image_height * 4) as usize
-        {
-            return Err(PyValueError::new_err(
-                "image pixel buffer has the wrong size",
-            ));
-        }
-        let info = SkImageInfo::new(
-            (image_width as i32, image_height as i32),
-            ColorType::RGBA8888,
-            AlphaType::Unpremul,
-            None,
-        );
-        let image = Image::from_raster_data(
-            &info,
-            Data::new_copy(pixels.as_slice()),
-            (image_width * 4) as usize,
-        )
-        .ok_or_else(|| PyRuntimeError::new_err("Skia Image::from_raster_data failed"))?;
-        let shader = image
-            .to_shader(
-                Some((TileMode::Clamp, TileMode::Clamp)),
-                Self::image_sampling(sampling),
-                None,
-            )
-            .ok_or_else(|| PyRuntimeError::new_err("Skia image shader failed"))?;
-
-        let (w, h) = (image_width as f32, image_height as f32);
-        let tex = [
-            Point::new(0.0, 0.0),
-            Point::new(w, 0.0),
-            Point::new(w, h),
-            Point::new(0.0, h),
-        ];
-        let corners = [
-            Point::new(quad[0].0, quad[0].1),
-            Point::new(quad[1].0, quad[1].1),
-            Point::new(quad[2].0, quad[2].1),
-            Point::new(quad[3].0, quad[3].1),
-        ];
-        let positions = [
-            corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
-        ];
-        let tex_coords = [tex[0], tex[1], tex[2], tex[0], tex[2], tex[3]];
-        let colors = [Color::WHITE; 6];
-        let vertices = Vertices::new_copy(
-            VertexMode::Triangles,
-            &positions,
-            &tex_coords,
-            &colors,
-            None,
-        );
+        let corners: Vec<Point> = quad.iter().map(|&(x, y)| Point::new(x, y)).collect();
+        let image = self.texture(key, pixels, image_width, image_height)?;
+        let other = match &mix {
+            Some((mix_key, mix_pixels, weight)) => Some((
+                self.texture(
+                    *mix_key,
+                    mix_pixels.bind(pixels.py()),
+                    image_width,
+                    image_height,
+                )?,
+                weight.clamp(0.0, 1.0),
+            )),
+            None => None,
+        };
         let canvas = self.surface.canvas();
+        let depth = canvas.save();
         canvas.reset_matrix();
-        self.paint.set_shader(shader);
-        self.paint.set_style(Style::Fill);
-        self.paint.set_color(Color::WHITE);
-        self.paint.set_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8);
-        canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
-        self.paint.set_shader(None);
-        self.paint.set_alpha(255);
-        canvas.set_matrix(&self.matrix);
-        Ok(())
+        let result = match other {
+            None => self.draw_image_vertices(&image, &corners, alpha, sampling, BlendMode::SrcOver),
+            Some((other, weight)) => {
+                self.surface
+                    .canvas()
+                    .save_layer_alpha_f(Rect::bounds(&corners), alpha.clamp(0.0, 1.0));
+                self.draw_image_vertices(&image, &corners, 1.0 - weight, sampling, BlendMode::Plus)
+                    .and_then(|()| {
+                        self.draw_image_vertices(
+                            &other,
+                            &corners,
+                            weight,
+                            sampling,
+                            BlendMode::Plus,
+                        )
+                    })
+            }
+        };
+        // Also pops the mix layer, if there is one.
+        self.surface.canvas().restore_to_count(depth);
+        result
     }
 
     /// Draw another Skia target's surface into a device-space quad without
@@ -742,6 +797,9 @@ impl SkiaTarget {
         if quad.len() != 4 {
             return Err(PyValueError::new_err("target quad needs four corners"));
         }
+        // The source's frame is complete once it is composited: it is never
+        // read back itself, so its textures age here.
+        source.textures.end_frame();
         // Both surfaces belong to the one DirectContext, which orders the
         // source's pending draws before this read; no flush is needed.
         let image = source.surface.image_snapshot();
@@ -854,8 +912,8 @@ impl SkiaTarget {
     /// source of the following fills and strokes (Cairo's `set_source` with an
     /// image pattern).  The local matrix maps the path's scene coordinates onto
     /// the image's device pixels, keeping the mask and background on the GPU.
-    /// `key` identifies an immutable pixel source (a cached image file) whose
-    /// upload is kept; pass None for pixels that may change between calls.
+    /// `key` names an immutable pixel source (a cached image file) whose
+    /// texture is kept; pass None for pixels that may change between calls.
     ///
     /// With `transient`, `key` names pixels that are only valid for a while
     /// (one batch of a frame): the upload is kept in a single slot and reused
@@ -881,14 +939,12 @@ impl SkiaTarget {
                     image
                 }
             },
-            (Some(key), false) => match self.fill_images.get(&key) {
-                Some(image) => image.clone(),
-                None => {
-                    let image = Self::raster_image(pixels, self.width, self.height)?;
-                    self.fill_images.insert(key, image.clone());
-                    image
-                }
-            },
+            (Some(key), false) => {
+                let (width, height) = (self.width, self.height);
+                self.textures.get(&mut self.context, key, false, || {
+                    Self::raster_image(pixels, width, height)
+                })?
+            }
             (None, _) => Self::raster_image(pixels, self.width, self.height)?,
         };
         // The shader's local matrix takes image pixels to the path's scene
@@ -930,8 +986,7 @@ impl SkiaTarget {
     /// texel is multiplied by its vertex colour, and the triangles blend over
     /// each other in order inside one layer composited with `alpha`.  With
     /// `occlude` (an RGBA colour) the triangles first replace what is under
-    /// them with that colour.  The texture is uploaded with mipmaps once per
-    /// `key`.
+    /// them with that colour.  The texture, with mipmaps, is kept per `key`.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (key, pixels, image_width, image_height, positions, uvs, colors, alpha, occlude=None))]
     fn draw_textured_mesh(
@@ -946,15 +1001,9 @@ impl SkiaTarget {
         alpha: f32,
         occlude: Option<(f32, f32, f32, f32)>,
     ) -> PyResult<()> {
-        let image = match self.mesh_images.get(&key) {
-            Some(image) => image.clone(),
-            None => {
-                let raster = Self::raster_image(pixels, image_width, image_height)?;
-                let image = raster.with_default_mipmaps().unwrap_or(raster);
-                self.mesh_images.insert(key, image.clone());
-                image
-            }
-        };
+        let image = self.textures.get(&mut self.context, key, true, || {
+            Self::raster_image(pixels, image_width, image_height)
+        })?;
         let positions = Self::f32_rows(positions, 2, "mesh positions")?;
         let uvs = Self::f32_rows(uvs, 2, "mesh uvs")?;
         let colors = Self::f32_rows(colors, 4, "mesh colors")?;
@@ -1056,6 +1105,7 @@ impl SkiaTarget {
 
     /// Flush Ganesh and copy the RGBA surface back to host memory.
     fn commit(&mut self) -> PyResult<Vec<u8>> {
+        self.textures.end_frame();
         self.context
             .flush_and_submit()
             .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
@@ -1075,11 +1125,115 @@ impl SkiaTarget {
         Ok(pixels)
     }
 
+    /// Start reading the surface as I420 video without waiting for the GPU;
+    /// returns a ticket for `collect_yuv420_into`.
+    ///
+    /// Skia converts on the GPU (`asyncRescaleAndReadPixelsYUV420`, as
+    /// Chrome's video capture does): BT.709 limited range, 1.5 instead of 4
+    /// bytes per pixel, and the encoder skips its own RGB-to-YUV conversion.
+    /// The read is ordered before later draws, so the next frame can be
+    /// drawn while this one is in flight.  The surface's colours are read as
+    /// they are: use it for opaque frames.
+    fn request_yuv420(&mut self) -> PyResult<u64> {
+        if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
+            return Err(PyValueError::new_err(
+                "YUV 4:2:0 frames need an even width and height",
+            ));
+        }
+        self.textures.end_frame();
+        let slot: YuvSlot = Rc::new(RefCell::new(None));
+        let callback_slot = slot.clone();
+        let (width, height) = (self.width as i32, self.height as i32);
+        self.surface.async_rescale_and_read_pixels_yuv420(
+            YUVColorSpace::Rec709_Limited,
+            None,
+            IRect::from_wh(width, height),
+            (width, height),
+            RescaleGamma::Src,
+            RescaleMode::Nearest,
+            move |read| *callback_slot.borrow_mut() = Some(read),
+        );
+        self.context
+            .flush_and_submit()
+            .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
+        self.next_ticket += 1;
+        self.yuv_reads.push_back((self.next_ticket, slot));
+        Ok(self.next_ticket)
+    }
+
+    /// Wait for a read started by `request_yuv420` and copy it into a
+    /// writable, C-contiguous uint8 buffer of `width * height * 3 / 2`
+    /// bytes: the Y plane, then the half-size U and V planes.
+    ///
+    /// Collect before the drawing of a later frame is submitted: a read that
+    /// is not done yet is waited for with a CPU sync on the work submitted
+    /// so far.
+    fn collect_yuv420_into(&mut self, ticket: u64, target: &Bound<PyAny>) -> PyResult<()> {
+        let index = self
+            .yuv_reads
+            .iter()
+            .position(|(pending, _)| *pending == ticket)
+            .ok_or_else(|| PyValueError::new_err(format!("no YUV read {ticket} in flight")))?;
+        let (_, slot) = self.yuv_reads.remove(index).expect("index is in range");
+        self.context.check_async_work_completion();
+        if slot.borrow().is_none() {
+            self.context.submit(gpu::SyncCpu::Yes);
+            self.context.check_async_work_completion();
+        }
+        let read = slot
+            .borrow_mut()
+            .take()
+            .flatten()
+            .ok_or_else(|| PyRuntimeError::new_err("Skia YUV 4:2:0 readback failed"))?;
+        let (width, height) = (self.width as usize, self.height as usize);
+        let buffer = PyBuffer::<u8>::get(target)
+            .map_err(|error| PyRuntimeError::new_err(format!("readback buffer: {error}")))?;
+        if buffer.readonly() {
+            return Err(PyValueError::new_err("readback buffer is read-only"));
+        }
+        let expected = width * height * 3 / 2;
+        if buffer.item_count() != expected {
+            return Err(PyValueError::new_err(format!(
+                "readback buffer has {} bytes, expected {expected}",
+                buffer.item_count()
+            )));
+        }
+        let slice = buffer
+            .as_mut_slice(target.py())
+            .ok_or_else(|| PyValueError::new_err("readback buffer must be C-contiguous"))?;
+        // SAFETY: Cell<u8> is repr(transparent) over u8; the buffer is held by
+        // `buffer` and nothing else writes to it during this call.
+        let data = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected) };
+        let mut offset = 0;
+        for (plane, (plane_width, plane_height)) in [
+            (width, height),
+            (width / 2, height / 2),
+            (width / 2, height / 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stride = read.row_bytes(plane);
+            // SAFETY: Skia's result holds `plane_height` rows of `stride`
+            // bytes for this plane while `read` is alive.
+            let source = unsafe {
+                std::slice::from_raw_parts(read.data(plane) as *const u8, stride * plane_height)
+            };
+            for (row, line) in source.chunks_exact(stride).enumerate() {
+                let start = offset + row * plane_width;
+                data[start..start + plane_width].copy_from_slice(&line[..plane_width]);
+            }
+            offset += plane_width * plane_height;
+        }
+        Ok(())
+    }
+
     /// Flush Ganesh and write the RGBA surface directly into a writable
     /// Python buffer (normally a C-contiguous NumPy frame array).  This avoids
     /// the temporary Rust vector and the second Python-side copy done by
     /// ``commit()``.
     fn commit_into(&mut self, target: &Bound<PyAny>) -> PyResult<()> {
+        self.textures.end_frame();
         self.context
             .flush_and_submit()
             .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;

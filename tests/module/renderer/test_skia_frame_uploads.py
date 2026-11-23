@@ -52,6 +52,13 @@ class _RecordingTarget:
         self.calls["commit_into"] += 1
         frame[...] = 0
 
+    def request_yuv420(self):
+        self.calls["request_yuv420"] += 1
+        return self.calls["request_yuv420"]
+
+    def collect_yuv420_into(self, ticket, frame):
+        frame[...] = 0
+
 
 class _RecordingDevice:
     calls: Counter = Counter()
@@ -99,8 +106,10 @@ def test_static_layer_is_captured_once_per_play_and_never_uploaded(calls, tmp_pa
         }
     ):
         _Moving().render()
-    frames = calls["commit_into"]
+    # Movie frames are read as YUV on the GPU, not as RGBA.
+    frames = calls["request_yuv420"]
     assert frames >= 20
+    assert calls["commit_into"] == 0
     assert calls["capture_static_layer"] == 2
     assert calls["load_pixels"] == 0
     assert calls["restore_static_layer"] >= frames
@@ -158,3 +167,61 @@ def test_batched_path_matches_cairo_path(mobject):
         for a, b in zip(cairo_ops.ops, skia_ops.ops):
             assert a[0] == b[0]
             np.testing.assert_allclose(a[1:], b[1:])
+
+
+class _ImageCalls(_RecordingTarget):
+    draws: list[tuple] = []
+
+    def draw_image_quad(self, key, pixels, width, height, quad, alpha, sampling, mix=None):
+        self.draws.append((key, id(pixels), alpha, None if mix is None else (mix[0], mix[2])))
+
+
+class _ImageDevice(_RecordingDevice):
+    def create_skia_target(self, width, height):
+        return _ImageCalls(self.calls, width, height)
+
+
+class _ImageFades(Scene):
+    def construct(self):
+        from manim import FadeIn, ImageMobject, Transform
+
+        rng = np.random.default_rng(0)
+        first = ImageMobject(rng.integers(0, 255, (8, 8, 4), dtype=np.uint8))
+        second = ImageMobject(rng.integers(0, 255, (8, 8, 4), dtype=np.uint8))
+        self.play(FadeIn(first), run_time=1)
+        self.play(Transform(first, second), run_time=1)
+        self.keys = first.texture_key, second.texture_key
+
+
+def test_image_animations_reuse_their_textures(monkeypatch, tmp_path):
+    _ImageCalls.draws = []
+    monkeypatch.setattr(skia_renderer.manim_vk, "Device", _ImageDevice)
+    with tempconfig(
+        {
+            "renderer": "vulkan",
+            "frame_rate": 10,
+            "pixel_width": 160,
+            "pixel_height": 90,
+            "media_dir": str(tmp_path),
+            "disable_caching": True,
+        }
+    ):
+        scene = _ImageFades()
+        scene.render()
+    draws = _ImageCalls.draws
+    # One source array, under one key, is drawn for the whole fade: only the
+    # opacity changes.  The transform draws the two sources with a weight.
+    fade = [d for d in draws if d[3] is None and d[2] < 1]
+    assert len(fade) >= 5
+    assert len({(key, array) for key, array, _, _ in fade}) == 1
+    assert [d[2] for d in fade] == sorted(d[2] for d in fade)
+    mixes = [d for d in draws if d[3] is not None]
+    assert len(mixes) >= 5
+    first_key, second_key = mixes[0][0], mixes[0][3][0]
+    assert first_key != second_key
+    assert {d[0] for d in mixes} == {first_key}
+    assert {d[3][0] for d in mixes} == {second_key}
+    weights = [d[3][1] for d in mixes]
+    assert weights == sorted(weights)
+    assert weights[0] > 0
+    assert weights[-1] < 1

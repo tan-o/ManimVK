@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import platform
 from bisect import bisect_right
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import srt
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ..manager import Manager, RenderedFrame
+    from ..scene.video_segment_encoder import YUV420Frame
     from .loop import _Frame, _Play
 
 __all__: list[str] = []
@@ -35,6 +37,8 @@ class _Encoder(_RunListener):
         self._manager = manager
         self._writing = False
         self._start = 0.0
+        # A frame whose GPU read is in flight: its collector and repeat.
+        self._in_flight: tuple[Callable[[], YUV420Frame], int] | None = None
 
     def play_started(self, play: _Play) -> None:
         manager = self._manager
@@ -56,17 +60,40 @@ class _Encoder(_RunListener):
             and not manager.scene.skip_animation_preview
             and manager._wants_frame_pixels
         ):
-            manager.file_writer.write_frame(frame.pixels(), repeat=frame.repeat)
+            writer = manager.file_writer
+            if writer.accepts_yuv420:
+                # Pipelined readback: frame N is collected after frame N+1 is
+                # drawn but before its read is submitted, so the GPU finishes
+                # N while Python prepares N+1.
+                frame.draw()
+                self._write_in_flight()
+                collect = frame.request_yuv420()
+                if collect is not None:
+                    self._in_flight = (collect, frame.repeat)
+                    return
+            writer.write_frame(frame.pixels(), repeat=frame.repeat)
+
+    def _write_in_flight(self) -> None:
+        if self._in_flight is not None:
+            collect, repeat = self._in_flight
+            self._in_flight = None
+            self._manager.file_writer.write_frame(collect(), repeat=repeat)
 
     def play_finished(self, play: _Play) -> None:
         writer = self._manager.file_writer
+        self._write_in_flight()
         writer.end_animation(self._writing)
         if play.in_output:
             writer.add_movie_interval(self._start, self._manager.time)
         self._writing = False
 
     def play_failed(self, play: _Play) -> None:
-        # Manager.play discards the play's segment.
+        # Manager.play discards the play's segment; the read in flight is
+        # finished and dropped.
+        if self._in_flight is not None:
+            with suppress(Exception):
+                self._in_flight[0]()
+            self._in_flight = None
         self._writing = False
 
     def marker(self, marker: _Section | _Caption | _Sound) -> None:

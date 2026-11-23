@@ -34,7 +34,14 @@ KEYS_TO_FILTER_OUT = {
     "background",
     "pixel_array",
     "pixel_array_to_cairo_context",
+    "_pixel_array",
+    "_image_mix",
+    "texture_key",
+    "_image_mix_key",
 }
+# Pixel data, hashed when ``include_pixel_array`` is set.  Texture keys are
+# run-dependent and always left out.
+_PIXEL_KEYS = {"pixel_array", "_pixel_array", "_image_mix"}
 
 
 def _canonical_field_title(title: Any) -> Any:
@@ -395,7 +402,7 @@ class _CustomEncoder(json.JSONEncoder):
             for k, v in dct.items():
                 v = self._memoizer.check_already_processed(v)
                 if k in KEYS_TO_FILTER_OUT and not (
-                    self.include_pixel_array and k == "pixel_array"
+                    self.include_pixel_array and k in _PIXEL_KEYS
                 ):
                     continue
                 # We check if the k is of the right format (supported by JSON)

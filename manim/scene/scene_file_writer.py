@@ -39,7 +39,7 @@ from .audio_mixer import (
     _SoundMix,
 )
 from .section import DefaultSectionType, Section
-from .video_segment_encoder import VideoSegmentEncoder
+from .video_segment_encoder import VideoSegmentEncoder, YUV420Frame
 
 # PyAV added the chapter API in 16.0; older versions write movies without chapters.
 _SUPPORTS_CHAPTERS = hasattr(av.container.OutputContainer, "set_chapters")
@@ -492,13 +492,25 @@ class SceneFileWriter:
             start = self._intervals.pop()[0]
         self._intervals.append((start, end))
 
+    @property
+    def accepts_yuv420(self) -> bool:
+        """Whether :meth:`write_frame` takes :class:`.YUV420Frame` frames:
+        the output is a video encoded as ``yuv420p``.
+        """
+        return (
+            self.output_spec.is_video
+            and self.video_encoder is not None
+            and self.video_encoder.pixel_format == "yuv420p"
+        )
+
     def write_frame(
         self,
-        pixels: RGBAPixelArray,
+        pixels: RGBAPixelArray | YUV420Frame,
         *,
         repeat: int = 1,
     ) -> None:
-        """Take ownership of one top-left C-contiguous ``uint8`` RGBA frame.
+        """Take ownership of one top-left C-contiguous ``uint8`` RGBA frame,
+        or of a :class:`.YUV420Frame` when :attr:`accepts_yuv420`.
 
         The caller must not mutate or reuse ``pixels`` after this method returns
         because video encoding can consume the array asynchronously.

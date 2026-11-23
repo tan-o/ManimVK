@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from manim.animation.animation import Animation
     from manim.scene.scene import Scene
 
+    from ...scene.video_segment_encoder import YUV420Frame
     from ...typing import RGBAPixelArray
 
 __all__ = ["CairoRenderer"]
@@ -316,6 +317,14 @@ class CairoRenderer(_RendererExecutionView):
         """Copy the current image to an RGBA array, with row zero at the top."""
         self._draw_final_state()
         return self._get_target().read_pixels()
+
+    def request_yuv420_frame(self) -> Callable[[], YUV420Frame] | None:
+        """Start reading the current image converted for a ``yuv420p``
+        video; returns a function that finishes the read, or None when this
+        renderer does not convert (Cairo draws on the CPU, where the encoder
+        converts as well).
+        """
+        return None
 
     def _draw_final_state(self) -> None:
         scene, self._final_scene = self._final_scene, None
