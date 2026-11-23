@@ -310,6 +310,8 @@ struct SkiaTarget {
     fill_images: HashMap<u64, Image>,
     /// Mipmapped mesh textures keyed by the caller's cache key.
     mesh_images: HashMap<u64, Image>,
+    /// The last transient background image (see `set_source_image`).
+    transient_image: Option<(u64, Image)>,
 }
 
 impl SkiaTarget {
@@ -356,6 +358,7 @@ impl SkiaTarget {
             background_layer: None,
             fill_images: HashMap::new(),
             mesh_images: HashMap::new(),
+            transient_image: None,
         })
     }
 
@@ -853,7 +856,12 @@ impl SkiaTarget {
     /// the image's device pixels, keeping the mask and background on the GPU.
     /// `key` identifies an immutable pixel source (a cached image file) whose
     /// upload is kept; pass None for pixels that may change between calls.
-    #[pyo3(signature = (pixels, red, green, blue, alpha, key=None))]
+    ///
+    /// With `transient`, `key` names pixels that are only valid for a while
+    /// (one batch of a frame): the upload is kept in a single slot and reused
+    /// while the same key comes back, instead of being cached for good.
+    #[pyo3(signature = (pixels, red, green, blue, alpha, key=None, transient=false))]
+    #[allow(clippy::too_many_arguments)]
     fn set_source_image(
         &mut self,
         pixels: &Bound<PyAny>,
@@ -862,9 +870,18 @@ impl SkiaTarget {
         blue: f32,
         alpha: f32,
         key: Option<u64>,
+        transient: bool,
     ) -> PyResult<()> {
-        let image = match key {
-            Some(key) => match self.fill_images.get(&key) {
+        let image = match (key, transient) {
+            (Some(key), true) => match &self.transient_image {
+                Some((cached_key, image)) if *cached_key == key => image.clone(),
+                _ => {
+                    let image = Self::raster_image(pixels, self.width, self.height)?;
+                    self.transient_image = Some((key, image.clone()));
+                    image
+                }
+            },
+            (Some(key), false) => match self.fill_images.get(&key) {
                 Some(image) => image.clone(),
                 None => {
                     let image = Self::raster_image(pixels, self.width, self.height)?;
@@ -872,7 +889,7 @@ impl SkiaTarget {
                     image
                 }
             },
-            None => Self::raster_image(pixels, self.width, self.height)?,
+            (None, _) => Self::raster_image(pixels, self.width, self.height)?,
         };
         // The shader's local matrix takes image pixels to the path's scene
         // coordinates: the inverse of the canvas matrix.

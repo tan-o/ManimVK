@@ -6,6 +6,7 @@ Mobjects
 .. autosummary::
    :toctree: ../reference
 
+   ~mobject.batch
    ~mobject.frame
    ~mobject.geometry
    ~mobject.graph

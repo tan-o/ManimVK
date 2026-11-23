@@ -1,0 +1,17 @@
+[package]
+name = "manim_core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "manim_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py311"] }
+numpy = "0.24"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

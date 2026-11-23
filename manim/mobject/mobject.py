@@ -20,6 +20,7 @@ from functools import partialmethod, reduce
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import manim_core
 import numpy as np
 
 from manim.data_structures import MethodWithArgs
@@ -40,6 +41,7 @@ from ..utils.iterables import (
     list_difference_update,
     remove_list_redundancies,
 )
+from ..utils.bezier import interpolate
 from ..utils.paths import straight_path
 from ..utils.simple_functions import clip
 from ..utils.space_ops import angle_between_vectors, normalize, rotation_matrix
@@ -89,6 +91,20 @@ def _updater_uses_dt(updater: Callable[..., object]) -> bool:
         _UPDATER_USES_DT[updater] = uses_dt
     return uses_dt
 
+
+
+def _vector3(vector: Vector3DLike) -> np.ndarray:
+    """``vector`` as a flat 3-vector for the native kernels.
+
+    NumPy broadcasting accepted a ``(1, 3)`` point (such as a ValueTracker's
+    ``points``) or a scalar where a vector was expected; so does this.
+    """
+    flat = np.asarray(vector, dtype=float).ravel()
+    if flat.size == 3:
+        return flat
+    if flat.size == 1:
+        return np.full(3, flat[0])
+    raise ValueError(f"expected a 3D vector, got shape {np.shape(vector)}")
 
 
 class Mobject:
@@ -1447,10 +1463,13 @@ class Mobject:
         --------
         :meth:`move_to`
         """
-        total_vector = reduce(op.add, vectors)
-        for mob in self.family_members_with_points():
-            mob.points = mob.points.astype("float")
-            mob.points += total_vector
+        total_vector = _vector3(reduce(op.add, vectors))
+        members = self.family_members_with_points()
+        moved = manim_core.transform_points(
+            [mob.points for mob in members], shift=total_vector
+        )
+        for mob, points in zip(members, moved):
+            mob.points = points
 
         return self
 
@@ -1502,9 +1521,8 @@ class Mobject:
         :meth:`move_to`
 
         """
-        self.apply_points_function_about_point(
-            lambda points: scale_factor * points, about_point, about_edge
-        )
+        factors = np.broadcast_to(np.asarray(scale_factor, dtype=float), (3,))
+        self._apply_matrix_about_point(np.diag(factors), about_point, about_edge)
         return self
 
     def rotate_about_origin(self, angle: float, axis: Vector3DLike = OUT) -> Self:
@@ -1577,10 +1595,7 @@ class Mobject:
         :class:`~.Rotating`, :class:`~.Rotate`, :attr:`~.Mobject.animate`, :meth:`apply_points_function_about_point`
 
         """
-        rot_matrix = rotation_matrix(angle, axis)
-        self.apply_points_function_about_point(
-            lambda points: np.dot(points, rot_matrix.T), about_point, about_edge
-        )
+        self._apply_matrix_about_point(rotation_matrix(angle, axis), about_point, about_edge)
         return self
 
     def flip(
@@ -1618,11 +1633,9 @@ class Mobject:
         about_point: Point3DLike | None = None,
         about_edge: Vector3DLike | None = None,
     ) -> Self:
-        def func(points: Point3D_Array) -> Point3D_Array:
-            points[:, dim] *= factor
-            return points
-
-        self.apply_points_function_about_point(func, about_point, about_edge)
+        factors = np.ones(3)
+        factors[dim] = factor
+        self._apply_matrix_about_point(np.diag(factors), about_point, about_edge)
         return self
 
     def apply_function(
@@ -1669,9 +1682,7 @@ class Mobject:
         full_matrix = np.identity(self.dim)
         matrix = np.array(matrix)
         full_matrix[: matrix.shape[0], : matrix.shape[1]] = matrix
-        self.apply_points_function_about_point(
-            lambda points: np.dot(points, full_matrix.T), about_point, about_edge
-        )
+        self._apply_matrix_about_point(full_matrix, about_point, about_edge)
         return self
 
     def apply_complex_function(
@@ -1734,6 +1745,29 @@ class Mobject:
     # In place operations.
     # Note, much of these are now redundant with default behavior of
     # above methods
+
+    def _apply_matrix_about_point(
+        self,
+        matrix: MatrixMN,
+        about_point: Point3DLike | None = None,
+        about_edge: Vector3DLike | None = None,
+    ) -> Self:
+        """Map the points of the family through ``matrix`` about a point, in one
+        native call; :meth:`apply_points_function_about_point` with a linear map.
+        """
+        if about_point is None:
+            if about_edge is None:
+                about_edge = ORIGIN
+            about_point = self.get_critical_point(about_edge)
+        members = self.family_members_with_points()
+        mapped = manim_core.transform_points(
+            [mob.points for mob in members],
+            np.asarray(matrix, dtype=float),
+            _vector3(about_point),
+        )
+        for mob, points in zip(members, mapped):
+            mob.points = points
+        return self
 
     def apply_points_function_about_point(
         self,
@@ -2413,14 +2447,27 @@ class Mobject:
     def get_num_points(self) -> int:
         return len(self.points)
 
+    def _boundary_box(self) -> tuple[Point3D, Point3D] | None:
+        """``(low, high)`` corners of the box around
+        :meth:`get_points_defining_boundary`, or None without points."""
+        return manim_core.bounds(
+            [mob.points for mob in self.get_family() if len(mob.points)]
+        )
+
     def get_extremum_along_dim(
         self, points: Point3DLike_Array | None = None, dim: int = 0, key: int = 0
     ) -> float:
-        np_points: Point3D_Array = (
-            self.get_points_defining_boundary()
-            if points is None
-            else np.asarray(points)
-        )
+        if points is None:
+            box = self._boundary_box()
+            if box is None:
+                raise ValueError(f"{type(self).__name__} has no points")
+            low, high = box
+            if key < 0:
+                return low[dim]
+            if key == 0:
+                return (low[dim] + high[dim]) / 2
+            return high[dim]
+        np_points: Point3D_Array = np.asarray(points)
         values = np_points[:, dim]
         if key < 0:
             rv: float = np.min(values)
@@ -2447,17 +2494,12 @@ class Mobject:
             max_y_3 = sample.get_extremum_along_dim(dim=1, key=1)
 
         """
-        result = np.zeros(self.dim)
-        all_points = self.get_points_defining_boundary()
-        if len(all_points) == 0:
-            return result
-        for dim in range(self.dim):
-            result[dim] = self.get_extremum_along_dim(
-                all_points,
-                dim=dim,
-                key=np.array(direction[dim]),
-            )
-        return result
+        box = self._boundary_box()
+        if box is None:
+            return np.zeros(self.dim)
+        low, high = np.asarray(box[0]), np.asarray(box[1])
+        direction = np.asarray(direction)
+        return np.where(direction < 0, low, np.where(direction > 0, high, (low + high) / 2))
 
     # Pseudonyms for more general get_critical_point method
 
@@ -2529,12 +2571,14 @@ class Mobject:
         return self.get_edge_center(IN)
 
     def length_over_dim(self, dim: int) -> float:
-        """Measure the length of an :class:`~.Mobject` in a certain direction."""
-        max_coord = self.reduce_across_dimension(max, dim)
-        min_coord = self.reduce_across_dimension(min, dim)
-        if max_coord is None or min_coord is None:
+        """Measure the length of an :class:`~.Mobject` in a certain direction.
+
+        All points count, handles included, as in :meth:`reduce_across_dimension`.
+        """
+        box = manim_core.bounds([mob.points for mob in self.get_family() if len(mob.points)])
+        if box is None:
             return 0
-        return max_coord - min_coord
+        return box[1][dim] - box[0][dim]
 
     def get_coord(self, dim: int, direction: Vector3DLike = ORIGIN) -> float:
         """Meant to generalize ``get_x``, ``get_y`` and ``get_z``"""
@@ -2733,7 +2777,13 @@ class Mobject:
         :meth:`~.Mobject.family_members_with_points`, :meth:`~.Mobject.align_data`
 
         """
-        return remove_list_redundancies(list(self._iter_family(set())))
+        submobjects = self.submobjects
+        if not submobjects:
+            return [self]
+        family = list(self._iter_family(set()))
+        if len(set(map(id, family))) != len(family):
+            family = remove_list_redundancies(family)
+        return family
 
     def _iter_family(self, active_path: MutableSet[Mobject]) -> Iterator[Mobject]:
         if self in active_path:
@@ -3348,7 +3398,11 @@ class Mobject:
         :class:`~.Transform`, :meth:`~.VMobject.align_points`, :meth:`~.VMobject.interpolate_color`
 
         """
-        self.points = path_func(mobject1.points, mobject2.points, alpha)
+        start, end = mobject1.points, mobject2.points
+        if path_func is interpolate and start.shape == end.shape:
+            self.points = manim_core.lerp(start, end, alpha)
+        else:
+            self.points = path_func(start, end, alpha)
         self.interpolate_color(mobject1, mobject2, alpha)
         return self
 

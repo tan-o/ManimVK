@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import manim_core
 import numpy as np
 from PIL.Image import Image
 
@@ -1806,9 +1807,15 @@ class VMobject(Mobject):
         return list(it.chain.from_iterable(zip(s, e, strict=True)))
 
     def get_points_defining_boundary(self) -> Point3D_Array:
-        # Probably returns all anchors, but this is weird regarding  the name of the method.
-        return np.array(
-            tuple(it.chain(*(sm.get_anchors() for sm in self.get_family())))
+        """The anchors of the family: the bounding box ignores handles."""
+        anchors = [np.asarray(sm.get_anchors()) for sm in self.get_family()]
+        anchors = [a.reshape(-1, 3) for a in anchors if len(a)]
+        return np.concatenate(anchors) if anchors else np.zeros((0, 3))
+
+    def _boundary_box(self) -> tuple[Point3D, Point3D] | None:
+        return manim_core.bounds(
+            [sm.points for sm in self.get_family() if len(sm.points)],
+            self.n_points_per_cubic_curve,
         )
 
     def get_arc_length(self, sample_points_per_curve: int | None = None) -> float:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,7 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._gpu_dirty = False
         self._background_pending = False
         self._last_readback: RGBAPixelArray | None = None
+        self._image_batches = itertools.count()
         self._native.clear_rgba(0.0, 0.0, 0.0, 0.0)
         self._owner_thread = threading.get_ident()
 
@@ -183,18 +185,28 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._native.draw_target_quad(source._native, quad, float(alpha))
         self._mark_gpu_written()
 
-    def set_source_image(self, pixels, rgba) -> None:
+    def new_image_batch(self) -> int:
+        """A number for one batch of :meth:`set_source_image` calls."""
+        return next(self._image_batches)
+
+    def set_source_image(self, pixels, rgba, batch: int | None = None) -> None:
         """Make a full-frame background image, tinted by ``rgba``, the source
         of the next fills and strokes.
 
         Read-only arrays are image files cached for the renderer's lifetime
-        (see ``_ImageFiles``), so their identity keys the GPU upload; other
-        arrays may change and are uploaded on each call.
+        (see ``_ImageFiles``), so their identity keys the GPU upload.  Other
+        arrays may change between frames: pass the same ``batch`` number for
+        every call that uses them in one batch, and they are uploaded once for
+        that batch.
         """
         self._ensure_open()
         pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
-        key = None if pixels.flags.writeable else id(pixels)
-        self._native.set_source_image(pixels, *(float(c) for c in rgba), key)
+        if not pixels.flags.writeable:
+            self._native.set_source_image(pixels, *(float(c) for c in rgba), id(pixels))
+        else:
+            self._native.set_source_image(
+                pixels, *(float(c) for c in rgba), batch, batch is not None
+            )
 
     def draw_textured_mesh(
         self, key: int, texture, positions, uvs, colors, alpha: float, occlude=None

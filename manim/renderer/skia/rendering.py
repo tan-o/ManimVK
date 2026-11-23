@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 
+import manim_core
 import numpy as np
 
 from manim.mobject.sksl import SkSLMobject
@@ -28,21 +29,11 @@ _SAMPLING = {
 
 # Skia paths are single precision and break down on huge coordinates, such as
 # a function plotted through a pole.  Curves reaching beyond this many scene
-# units are drawn as straight lines between their anchors, clamped to it:
-# off-screen either way, and a pole still shows as a vertical line.
+# units are drawn as straight lines between their anchors, clamped to it
+# (manim_core.tame_huge_curves): off-screen either way, and a pole still shows
+# as a vertical line.
 _COORDINATE_LIMIT = 1e5
 
-
-def _tame_huge_curves(points: np.ndarray, nppcc: int) -> np.ndarray:
-    if len(points) % nppcc or np.abs(points).max(initial=0) <= _COORDINATE_LIMIT:
-        return points
-    curves = points.reshape(-1, nppcc, points.shape[1]).copy()
-    huge = np.abs(curves).max(axis=(1, 2)) > _COORDINATE_LIMIT
-    start = np.clip(curves[huge, 0], -_COORDINATE_LIMIT, _COORDINATE_LIMIT)
-    end = np.clip(curves[huge, -1], -_COORDINATE_LIMIT, _COORDINATE_LIMIT)
-    fractions = np.linspace(0, 1, nppcc)[None, :, None]
-    curves[huge] = start[:, None] + fractions * (end - start)[:, None]
-    return curves.reshape(points.shape)
 
 
 class SkiaDrawingContext(_CairoDrawingContext):
@@ -129,9 +120,10 @@ class SkiaDrawingContext(_CairoDrawingContext):
             return cached[1], cached[2]
         split = vmobject.get_subpath_split_indices_from_points(vmobject.points)
         points = np.ascontiguousarray(
-            _tame_huge_curves(
+            manim_core.tame_huge_curves(
                 self.camera.transform_points_pre_display(vmobject, vmobject.points),
                 vmobject.n_points_per_cubic_curve,
+                _COORDINATE_LIMIT,
             ),
             dtype=np.float64,
         )
@@ -207,29 +199,18 @@ class SkiaDrawingContext(_CairoDrawingContext):
     def _set_cairo_context_path(self, context, vmobject) -> None:
         """Send a VMobject's whole path to Skia in one native call.
 
-        Same subpaths and closing rule as the Cairo version, which issues one
-        call per point.
+        manim_core splits it into subpaths and decides which are closed with
+        the Cairo renderer's rules, in one call.
         """
-        nppcc = vmobject.n_points_per_cubic_curve
-        if nppcc != 4:
-            # The native call consumes cubic Beziers only.
-            super()._set_cairo_context_path(context, vmobject)
-            return
         points = self.camera.transform_points_pre_display(vmobject, vmobject.points)
-        points = _tame_huge_curves(points, nppcc)
-        subpaths: list[tuple[int, int, bool]] = []
-        if len(points):
-            for start, end in vmobject.get_subpath_split_indices_from_points(
-                points, n_dims=2
-            ):
-                start, end = int(start), int(end)
-                if end - start < nppcc:
-                    continue
-                closed = bool(
-                    vmobject.consider_points_equals_2d(points[start], points[end - 1])
-                )
-                subpaths.append((start, end, closed))
-        context.set_cubic_path(np.ascontiguousarray(points, dtype=np.float64), subpaths)
+        points, subpaths = manim_core.cubic_subpaths(
+            points,
+            vmobject.n_points_per_cubic_curve,
+            2,
+            vmobject.tolerance_for_point_equality,
+            _COORDINATE_LIMIT,
+        )
+        context.set_cubic_path(points, subpaths)
 
     def _set_cairo_context_color(self, context, rgbas, vmobject) -> None:
         if len(rgbas) == 1:
@@ -288,13 +269,14 @@ class SkiaDrawingContext(_CairoDrawingContext):
     def _display_background_colored_vmobjects(self, image, vmobjects) -> None:
         """Draw vmobjects coloured by a background image.
 
-        Cairo draws them into a scratch target and multiplies the image by the
-        result; here each fill and stroke uses the image, tinted by the colour
-        it would have, as its paint source.
+        Cairo draws them into a scratch target and uses its alpha as a mask
+        on the image; here each fill and stroke paints with the image, faded
+        by the opacity it would have, so the same coverage shows the image.
         """
         if not vmobjects:
             return
         background = self.target.get_background_image(image)
+        batch = self.target.new_image_batch()
         context = self.target.get_context(self.camera)
         for vmobject in vmobjects:
             self._set_cairo_context_path(context, vmobject)
@@ -310,7 +292,9 @@ class SkiaDrawingContext(_CairoDrawingContext):
                     rgbas = self.camera.get_stroke_rgbas(vmobject, background=background_stroke)
                 if not np.any(rgbas[:, 3]):
                     continue
-                self.target.set_source_image(background, np.mean(rgbas, axis=0))
+                self.target.set_source_image(
+                    background, (1.0, 1.0, 1.0, float(rgbas[:, 3].mean())), batch
+                )
                 if width is None:
                     context.fill_preserve()
                 else:

@@ -224,10 +224,17 @@ class TipableVMobject(VMobject):
     # Checking for tips
 
     def has_tip(self) -> bool:
-        return hasattr(self, "tip") and self.tip in self
+        return self._has_part(self.__dict__.get("tip"))
 
     def has_start_tip(self) -> bool:
-        return hasattr(self, "start_tip") and self.start_tip in self
+        return self._has_part(self.__dict__.get("start_tip"))
+
+    def _has_part(self, part: VMobject | None) -> bool:
+        # ``part in self`` without Mobject.__iter__ and without raising through
+        # Mobject.__getattr__ for a missing attribute: these run every frame.
+        if part is None:
+            return False
+        return part in self.submobjects or (part is self and self.has_points())
 
     # Getters
 
