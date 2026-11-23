@@ -975,13 +975,23 @@ class Scene:
         if self.always_update_mobjects or self.updaters:
             return list(self.mobjects)
 
-        i = next((i for i, mob in enumerate(mobjects) if consider_moving(mob)), None)
-        moving_mobjects = [] if i is None else mobjects[i:]
         movement_indicators: list[Mobject] = getattr(
             self.camera,
             "get_mobjects_indicating_movement",
             lambda: [],
         )()
+
+        # A camera frame can be animated or carry an updater without being a
+        # member of ``scene.mobjects``.  Its motion changes the projection of
+        # every static mobject, so the static-layer cache cannot be reused.
+        if any(
+            indicator in animation_mobjects or len(indicator.updaters) > 0
+            for indicator in movement_indicators
+        ):
+            return list_update(self.mobjects, self.foreground_mobjects)
+
+        i = next((i for i, mob in enumerate(mobjects) if consider_moving(mob)), None)
+        moving_mobjects = [] if i is None else mobjects[i:]
         moving_family = extract_mobject_family_members(moving_mobjects)
         if any(indicator in moving_family for indicator in movement_indicators):
             # A camera control changes the projection of all scene mobjects.

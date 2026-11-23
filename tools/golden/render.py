@@ -37,11 +37,33 @@ MAX_SAMPLED_TIME = 240.0
 def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, height: int) -> None:
     """Render one scene in this process (called through ``--worker``)."""
     import importlib.util
+    import random
 
     import numpy as np  # noqa: F401  (examples use np without importing it)
 
     from manim import config, tempconfig
     from manim.manager import Manager
+
+    def seed() -> None:
+        # Examples use both Python's and NumPy's global RNGs for layouts and
+        # StreamLines phases.  Cairo and Vulkan run in separate processes, so
+        # without an explicit seed they compare two different random scenes.
+        random.seed(0)
+        np.random.seed(0)
+
+    # networkx layout functions use ``np.random.default_rng(seed)``; a fresh
+    # generator with seed=None ignores ``np.random.seed``.  Force a deterministic
+    # seed for the comparison only.
+    import networkx.drawing.layout as nx_layout
+
+    for _name in ("spring_layout", "random_layout"):
+        _original = getattr(nx_layout, _name)
+
+        def _seeded_layout(*args, __original=_original, **kwargs):
+            kwargs.setdefault("seed", 0)
+            return __original(*args, **kwargs)
+
+        setattr(nx_layout, _name, _seeded_layout)
 
     target = out / renderer / entry["id"]
     target.mkdir(parents=True, exist_ok=True)
@@ -51,8 +73,18 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
         spec = importlib.util.spec_from_file_location(f"golden_{entry['id']}", scenes / "scenes" / entry["module"])
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
+        seed()
         spec.loader.exec_module(module)
         scene_class = getattr(module, entry["scene"])
+        original_construct = scene_class.construct
+
+        def seeded_construct(self) -> None:
+            # Seed as late as possible: scene initialization also consumes
+            # Python's global RNG in some examples.
+            seed()
+            original_construct(self)
+
+        scene_class.construct = seeded_construct
         settings = {
             "renderer": renderer,
             "pixel_width": width,
@@ -67,6 +99,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
         with tempconfig({**settings, "format": "none"}):
             frames = []
             times = np.arange(0.0, MAX_SAMPLED_TIME, SAMPLE_STEP).tolist()
+            seed()
             Manager(scene_class()).evaluate(frame_times=times, on_frame=frames.append)
             if frames:
                 picks = {"eval_first": frames[0], "eval_mid": frames[len(frames) // 2], "eval_last": frames[-1]}
@@ -75,6 +108,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
                     status["frames"].append({"name": name, "time": frame.time})
         # 2. The last frame of a real render.
         with tempconfig({**settings, "format": "png"}):
+            seed()
             scene = scene_class()
             scene.render()
             images = sorted((target / "media").rglob("*.png"), key=lambda p: p.stat().st_mtime)

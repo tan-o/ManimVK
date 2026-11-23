@@ -152,9 +152,55 @@ class SkiaDrawingContext(_CairoDrawingContext):
         background = self.target.get_background_image(image)
         context = self.target.get_context(self.camera)
         for vmobject in vmobjects:
+            fill_opacity = float(vmobject.get_fill_opacity())
+            if fill_opacity > 0:
+                # Cairo masks the background image by the object's own alpha:
+                # fill opacity 0 means *no image fill*, even though the path
+                # exists.  Filling the path with the image unconditionally
+                # turns every open StreamLine into a large opaque sliver: the
+                # fill rule implicitly closes the open path.
+                self._set_cairo_context_path(context, vmobject)
+                self._apply_image_stroke(context, vmobject, background, is_background=True)
+                self.target.fill_path_with_image(background)
             self._set_cairo_context_path(context, vmobject)
-            self.target.fill_path_with_image(background)
-            self._apply_stroke(context, vmobject)
+            self._apply_image_stroke(context, vmobject, background)
+
+    def _sample_background_color(self, background, vmobject, point) -> tuple[float, ...]:
+        coords = self._points_to_pixel_coords(
+            vmobject,
+            np.asarray([point], dtype=np.float64),
+        )[0]
+        x = int(np.clip(coords[0], 0, background.shape[1] - 1))
+        y = int(np.clip(coords[1], 0, background.shape[0] - 1))
+        rgba = background[y, x].astype(float) / 255.0
+        return (float(rgba[0]), float(rgba[1]), float(rgba[2]))
+
+    def _apply_image_stroke(self, context, vmobject, image_pixels, *, is_background=False) -> None:
+        """Paint a stroke with the image colors at the path endpoints.
+
+        Cairo draws the object into an alpha scratch and multiplies the
+        background image by that alpha, so the image -- not the white
+        ``color_using_background_image`` placeholder -- colors the stroke.
+        """
+        width = vmobject.get_stroke_width(background=is_background)
+        if width == 0:
+            return
+        opacity = float(vmobject.get_stroke_opacity(background=is_background))
+        if opacity <= 0:
+            return
+        color = self._sample_background_color(
+            image_pixels,
+            vmobject,
+            self.camera.transform_points_pre_display(
+                vmobject,
+                np.asarray([vmobject.get_center()], dtype=np.float64),
+            )[0],
+        )
+        context.set_source_rgba(color[0], color[1], color[2], opacity)
+        context.set_line_width(width * self.target.settings.cairo_line_width_multiple)
+        context.set_line_join(int(_LINE_JOIN_MAP[vmobject.joint_type]))
+        context.set_line_cap(int(_CAP_STYLE_MAP[vmobject.cap_style]))
+        context.stroke_preserve()
 
     def _display_point_cloud_mobjects(self, pmobjects) -> None:
         for pmobject in pmobjects:
@@ -165,22 +211,31 @@ class SkiaDrawingContext(_CairoDrawingContext):
         if len(points) == 0:
             return
         pixel_coords = self._points_to_pixel_coords(pmobject, points)
-        thickness = self._adjusted_thickness(pmobject.stroke_width)
-        pixel_coords = self._thickened_coordinates(pixel_coords, thickness)
+        # Cairo expands every point into an integer ``thickness`` x
+        # ``thickness`` block of pixels.  Calling ``_thickened_coordinates``
+        # here *and* drawing a square of half-size ``thickness / 2`` doubles
+        # both the point count and the footprint.  Draw one square per point
+        # instead, anchored at the same top-left pixel Cairo uses.
+        thickness = max(1, int(self._adjusted_thickness(pmobject.stroke_width)))
         rgbas = np.asarray(pmobject.rgbas, dtype=np.float64).reshape(-1, 4)
-        target_len = len(pixel_coords)
         if len(rgbas) == 0:
             return
-        factor = target_len // len(rgbas)
-        int_rgbas = np.repeat((255 * rgbas).astype(np.uint8), factor, axis=0)
+        int_rgbas = (255 * rgbas).astype(np.uint8)
         on_screen = self._on_screen_pixels(pixel_coords)
         pixel_coords = pixel_coords[on_screen]
         int_rgbas = int_rgbas[on_screen]
         entries = [
-            (float(x), float(y), int(r), int(g), int(b), int(a))
+            (
+                float(x) + thickness / 2,
+                float(y) + thickness / 2,
+                int(r),
+                int(g),
+                int(b),
+                int(a),
+            )
             for (x, y), (r, g, b, a) in zip(pixel_coords, int_rgbas, strict=True)
         ]
-        self.target.draw_point_pixels(entries, max(0.5, thickness / 2))
+        self.target.draw_point_pixels(entries, thickness / 2)
 
     def _display_image_mobjects(self, image_mobjects) -> None:
         for image_mobject in image_mobjects:

@@ -17,9 +17,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use skia_safe::{
-    AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, Data, Image,
-    ImageInfo as SkImageInfo, Matrix, Paint, PathBuilder, Point, Rect, RuntimeEffect,
-    SamplingOptions, TileMode, M44, gpu,
+    AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, CubicResampler, Data, FilterMode,
+    Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
+    RuntimeEffect, SamplingOptions, TileMode, M44, gpu,
 };
 use skia_safe::runtime_effect::RuntimeShaderBuilder;
 use skia_safe::vertices::{VertexMode, Vertices};
@@ -664,7 +664,7 @@ impl SkiaTarget {
         let shader = image
             .to_shader(
                 Some((TileMode::Clamp, TileMode::Clamp)),
-                SamplingOptions::default(),
+                SamplingOptions::from(CubicResampler::catmull_rom()),
                 None,
             )
             .ok_or_else(|| PyRuntimeError::new_err("Skia image shader failed"))?;
@@ -722,7 +722,7 @@ impl SkiaTarget {
         let shader = image
             .to_shader(
                 Some((TileMode::Clamp, TileMode::Clamp)),
-                SamplingOptions::default(),
+                SamplingOptions::from(CubicResampler::catmull_rom()),
                 None,
             )
             .ok_or_else(|| PyRuntimeError::new_err("Skia target image shader failed"))?;
@@ -856,7 +856,7 @@ impl SkiaTarget {
         let shader = image
             .to_shader(
                 Some((TileMode::Clamp, TileMode::Clamp)),
-                SamplingOptions::default(),
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
                 Some(&local),
             )
             .ok_or_else(|| PyRuntimeError::new_err("Skia background shader failed"))?;

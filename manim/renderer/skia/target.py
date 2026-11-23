@@ -156,9 +156,10 @@ class SkiaRenderTarget(_CairoRenderTarget):
         sx = settings.pixel_width / camera.frame_width
         sy = -settings.pixel_height / camera.frame_height
         tx = settings.pixel_width / 2 - center[0] * sx
-        # y' = sy * y + ty, with sy negative.  At the frame center this is
-        # exactly pixel_height / 2.
-        ty = settings.pixel_height / 2 + center[1] * sy
+        # y' = sy * (y - center_y) + pixel_height / 2.  sy is negative to flip
+        # Manim's y-up coordinates; the center term must therefore be
+        # subtracted, not added.
+        ty = settings.pixel_height / 2 - center[1] * sy
         self._native.set_matrix(sx, sy, tx, ty)
         self._mark_gpu_written()
         return self._native

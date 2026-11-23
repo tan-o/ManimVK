@@ -252,10 +252,17 @@ class _CairoDrawingContext:
         )
         scratch_context._display_non_background_colored_vmobjects(vmobjects)
         background = self.target.get_background_image(image)
-        colored = np.asarray(
-            background * scratch.pixels.astype(float) / 255,
-            dtype=np.uint8,
-        )
+        # Only the scratch *alpha* is a mask.  Multiplying the background RGB
+        # by the scratch alpha as well, and then passing that straight-alpha
+        # result to alpha_composite(), applies the coverage twice: a 50% edge
+        # pixel comes out 25% bright.  Keep the image RGB intact and mask only
+        # its alpha.
+        colored = np.array(background, copy=True)
+        colored[:, :, 3] = (
+            background[:, :, 3].astype(float)
+            * scratch.pixels[:, :, 3].astype(float)
+            / 255
+        ).astype(np.uint8)
         self._overlay_rgba_array(self.target.pixels, colored)
 
     def _display_point_cloud_mobjects(self, pmobjects: list[PMobject]) -> None:
