@@ -51,7 +51,7 @@ from ..animation.animation import Animation, Wait, prepare_animation
 from ..constants import *
 from ..manager import Manager
 from ..renderer.skia.renderer import SkiaRenderer
-from ..renderer.cairo.camera import Camera
+from ..camera import Camera
 from ..scene.scene_file_writer import _SceneFileWriterSettings
 
 if TYPE_CHECKING:

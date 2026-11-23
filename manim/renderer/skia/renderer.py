@@ -17,7 +17,7 @@ from PIL import Image
 from manim import logger
 from manim.mobject.mobject import Mobject
 from manim.mobject.types.image_mobject import ImageMobjectFromCamera
-from manim.renderer.cairo.camera import Camera, MultiCamera
+from manim.camera import Camera, MultiCamera
 from manim.renderer.cairo.renderer import CairoRenderer
 from manim.renderer.cairo.target import _ImageFiles
 from manim.renderer.protocol import RendererCapabilities, RendererState

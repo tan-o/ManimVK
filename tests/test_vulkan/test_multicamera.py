@@ -9,7 +9,7 @@ pytest.importorskip("manim_vk")
 
 from manim import Square, config, tempconfig  # noqa: E402
 from manim.mobject.types.image_mobject import ImageMobjectFromCamera  # noqa: E402
-from manim.renderer.cairo.camera import Camera, MultiCamera  # noqa: E402
+from manim.camera import Camera, MultiCamera  # noqa: E402
 from manim.renderer.skia.renderer import SkiaRenderer  # noqa: E402
 
 

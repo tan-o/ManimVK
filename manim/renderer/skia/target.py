@@ -14,7 +14,7 @@ from manim.renderer.cairo.target import (
 )
 
 if TYPE_CHECKING:
-    from manim.renderer.cairo.camera import Camera
+    from manim.camera import Camera
     from manim.typing import RGBAPixelArray
 
 

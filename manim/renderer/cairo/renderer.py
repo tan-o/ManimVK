@@ -14,7 +14,7 @@ from ...scene.scene_file_writer import SceneFileWriter
 from ...utils.iterables import list_update
 from .._execution import _RendererExecutionView
 from ..protocol import RendererCapabilities, RendererState
-from .camera import Camera, MultiCamera
+from ...camera import Camera, MultiCamera
 from .rendering import _CairoDrawingContext
 from .target import _CairoRasterSettings, _CairoRenderTarget, _ImageFiles
 

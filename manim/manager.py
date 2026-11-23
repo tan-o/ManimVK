@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from .animation.animation import Animation
     from .mobject.mobject import Mobject, _AnimationBuilder
     from .renderer.cairo import CairoRenderer
-    from .renderer.cairo.camera import Camera
+    from .camera import Camera
     from .scene.scene import Scene
     from .scene.scene_file_writer import SceneFileWriter
     from .timeline import Timeline
