@@ -6,11 +6,11 @@ import pytest
 
 from manim import Scene, Square, tempconfig
 from manim.renderer.cairo import CairoRenderer
-from manim.renderer.opengl.renderer import OpenGLRenderer
 from manim.renderer.protocol import Renderer, RendererState
+from manim.renderer.skia import SkiaRenderer
 
 
-@pytest.mark.parametrize("renderer_class", [CairoRenderer, OpenGLRenderer])
+@pytest.mark.parametrize("renderer_class", [CairoRenderer, SkiaRenderer])
 def test_renderers_implement_the_protocol(renderer_class):
     renderer = renderer_class()
     try:
@@ -26,7 +26,7 @@ def test_renderers_implement_the_protocol(renderer_class):
 SETTINGS = {"pixel_width": 16, "pixel_height": 8, "format": "none"}
 
 
-@pytest.mark.parametrize("renderer", ["cairo", "opengl"])
+@pytest.mark.parametrize("renderer", ["cairo", "vulkan"])
 def test_a_renderer_goes_from_unopened_to_open_to_closed(renderer):
     with tempconfig({**SETTINGS, "renderer": renderer}):
         renderer = Scene().renderer
@@ -41,7 +41,7 @@ def test_a_renderer_goes_from_unopened_to_open_to_closed(renderer):
 
 
 def test_a_failed_vulkan_close_can_be_retried():
-    with tempconfig({**SETTINGS, "renderer": "opengl"}):
+    with tempconfig({**SETTINGS, "renderer": "vulkan"}):
         renderer = Scene().renderer
         renderer.open()
         renderer.render_mobjects([Square()])

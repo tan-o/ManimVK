@@ -1,11 +1,11 @@
-"""Cairo and OpenGL expose the same animation times to user code."""
+"""Cairo and Vulkan expose the same animation times to user code."""
 
 import pytest
 
 from manim import Animation, Scene, Square, tempconfig
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 @pytest.mark.parametrize("duration", [1, 0.3])
 @pytest.mark.parametrize("skip", [False, True])
 def test_animation_clock_trace(backend, duration, skip):
@@ -23,7 +23,6 @@ def test_animation_clock_trace(backend, duration, skip):
         }
     ):
         scene = Scene(skip_animations=skip)
-        # OpenGL historically ignores Scene's skip_animations constructor argument.
         scene.renderer._skips_all_plays = skip
         scene.add(Square())
 
@@ -62,7 +61,7 @@ def test_animation_clock_trace(backend, duration, skip):
     assert plays == 1
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 @pytest.mark.parametrize("skip", [False, True])
 def test_frozen_wait_clock_trace(backend, skip):
     with tempconfig(
@@ -86,7 +85,7 @@ def test_frozen_wait_clock_trace(backend, skip):
             assert scene.renderer.num_plays == 1
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 def test_stop_condition_observes_consumed_time(backend):
     stops = []
     updates = []

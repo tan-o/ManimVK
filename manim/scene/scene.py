@@ -23,14 +23,6 @@ from queue import Queue
 
 from manim.scene.section import DefaultSectionType
 
-try:
-    import dearpygui.dearpygui as dpg
-
-    dearpygui_imported = True
-    dpg.create_context()
-    window = dpg.generate_uuid()
-except ImportError:
-    dearpygui_imported = False
 
 from collections.abc import Callable, Iterable, Sequence
 from types import FrameType
@@ -41,7 +33,6 @@ from tqdm import tqdm
 from watchdog.events import DirModifiedEvent, FileModifiedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from manim import __version__
 from manim.data_structures import MethodWithArgs
 from manim.mobject.mobject import Mobject
 from manim.mobject.types.point_cloud_mobject import Point
@@ -62,21 +53,14 @@ from ..manager import Manager
 from ..renderer.skia.renderer import SkiaRenderer
 from ..renderer.cairo.camera import Camera
 from ..scene.scene_file_writer import _SceneFileWriterSettings
-from ..utils import opengl, space_ops
 
 if TYPE_CHECKING:
-    from ..mobject.opengl.opengl_mobject import OpenGLMobject, OpenGLPoint
     from ..renderer.cairo.renderer import CairoRenderer
-    from ..renderer.opengl.camera import OpenGLCamera
-    from ..renderer.opengl.renderer import OpenGLRenderer
-    from ..renderer.opengl.shader import Object3D
     from ..renderer.vulkan.renderer import VulkanRenderer
 from ..utils.deprecation import deprecated
 from ..utils.exceptions import RerunSceneException
 from ..utils.family import extract_mobject_family_members
-from ..utils.family_ops import restructure_list_to_exclude_certain_family_members
 from ..utils.iterables import list_difference_update, list_update
-from ..utils.module_ops import scene_classes_from_file
 
 if TYPE_CHECKING:
     from typing import Self, TypeAlias
@@ -214,21 +198,16 @@ class Scene:
         self.last_t = 0.0
         self.queue: Queue[SceneInteractAction] = Queue()
         self.skip_animation_preview = False
-        self.meshes: list[Any] = []
         self.camera_target = ORIGIN
         self.widgets: list[dict[str, Any]] = []
-        self.dearpygui_imported = dearpygui_imported
         self.updaters: list[Callable[[float], None]] = []
         self.key_to_function_map: dict[str, Callable[[], None]] = {}
         self.mouse_press_callbacks: list[Callable[[], None]] = []
         self.interactive_mode = False
         self.manager: Manager[Self] | None = None
 
-        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
-            # Interaction points remain classic mobjects; the Vulkan backend
-            # does not consume OpenGL buffers.
-            self.mouse_point = Point()
-            self.mouse_drag_point = Point()
+        self.mouse_point = Point()
+        self.mouse_drag_point = Point()
 
         if renderer is None:
             if config.renderer == RendererType.CAIRO:
@@ -242,9 +221,7 @@ class Scene:
                 )
             else:
                 # Classic mobjects keep their full API; only the raster backend
-                # is switched from Cairo to Skia/Ganesh on Vulkan.  A Python
-                # level ``config.renderer = "opengl"`` is routed here too so
-                # the retired moderngl pipeline cannot be reached.
+                # is switched from Cairo to Skia/Ganesh on Vulkan.
                 renderer = SkiaRenderer(
                     camera_class=self.camera_class,
                     skip_animations=self.skip_animations,
@@ -313,7 +290,7 @@ class Scene:
         np.random.seed(self.random_seed)  # noqa: NPY002 (only way to set seed globally)
 
     @property
-    def renderer(self) -> CairoRenderer | OpenGLRenderer | VulkanRenderer:
+    def renderer(self) -> CairoRenderer | VulkanRenderer:
         """The renderer selected at construction, shared by this scene's plays.
 
         This property is read-only. Choose a different renderer when creating
@@ -322,7 +299,7 @@ class Scene:
         return self._renderer
 
     @property
-    def camera(self) -> Camera | OpenGLCamera:
+    def camera(self) -> Camera:
         return self.renderer.camera
 
     @property
@@ -382,8 +359,8 @@ class Scene:
         and cleanup, which can differ from the last frame written to the video.
 
         The returned image retains its pixels after the renderer is closed.
-        OpenGL snapshots must be requested on the thread that created the
-        rendering context.
+        Snapshots must be requested on the thread that created the render
+        target.
         """
         return self._get_manager().get_image()
 
@@ -407,7 +384,6 @@ class Scene:
         are commonly subclassed, and have some common setup
         involved before the construct method is called.
         """
-        pass
 
     def tear_down(self) -> None:
         """
@@ -415,7 +391,6 @@ class Scene:
         are commonly subclassed, and have some common method
         to be invoked before the scene ends.
         """
-        pass
 
     def construct(self) -> None:
         """Add content to the Scene.
@@ -492,11 +467,6 @@ class Scene:
         """
         for mobj in self.mobjects:
             mobj.update(dt)
-
-    def update_meshes(self, dt: float) -> None:
-        for obj in self.meshes:
-            for mesh in obj.get_family():
-                mesh.update(dt)
 
     def update_self(self, dt: float) -> None:
         """Run all scene updater functions.
@@ -577,23 +547,12 @@ class Scene:
         list
             List of mobject family members.
         """
-        if config.renderer == RendererType.OPENGL:
-            family_members = []
-            for mob in self.mobjects:
-                family_members.extend(mob.get_family())
-            return family_members
-        else:
-            assert config.renderer in (
-                RendererType.CAIRO,
-                RendererType.OPENGL,
-                RendererType.VULKAN,
-            )
-            return extract_mobject_family_members(
-                self.mobjects,
-                use_z_index=self.renderer.camera.use_z_index,
-            )
+        return extract_mobject_family_members(
+            self.mobjects,
+            use_z_index=self.renderer.camera.use_z_index,
+        )
 
-    def add(self, *mobjects: Mobject | OpenGLMobject) -> Self:
+    def add(self, *mobjects: Mobject) -> Self:
         """
         Mobjects will be displayed, from background to
         foreground in the order with which they are added.
@@ -609,33 +568,19 @@ class Scene:
             The same scene after adding the Mobjects in.
 
         """
-        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
-            new_mobjects = []
-            new_meshes: list[Any] = []
-            for mobject_or_mesh in mobjects:
-                if isinstance(mobject_or_mesh, Mobject):
-                    new_mobjects.append(mobject_or_mesh)
-                else:
-                    new_meshes.append(mobject_or_mesh)
-            self.remove(*new_mobjects)  # type: ignore[arg-type]
-            self.mobjects += new_mobjects  # type: ignore[arg-type]
-            self.remove(*new_meshes)  # type: ignore[arg-type]
-            self.meshes += new_meshes
-        else:
-            assert config.renderer == RendererType.CAIRO
-            new_mobjects = list(mobjects)  # type: ignore[assignment]
-            new_and_foreground_mobjects: list[Mobject] = [
-                *new_mobjects,
-                *self.foreground_mobjects,
-            ]
-            self.restructure_mobjects(to_remove=new_and_foreground_mobjects)
-            self.mobjects += new_and_foreground_mobjects
-            if self.moving_mobjects:
-                self.restructure_mobjects(
-                    to_remove=new_and_foreground_mobjects,
-                    mobject_list_name="moving_mobjects",
-                )
-                self.moving_mobjects += new_and_foreground_mobjects
+        new_mobjects = list(mobjects)
+        new_and_foreground_mobjects: list[Mobject] = [
+            *new_mobjects,
+            *self.foreground_mobjects,
+        ]
+        self.restructure_mobjects(to_remove=new_and_foreground_mobjects)
+        self.mobjects += new_and_foreground_mobjects
+        if self.moving_mobjects:
+            self.restructure_mobjects(
+                to_remove=new_and_foreground_mobjects,
+                mobject_list_name="moving_mobjects",
+            )
+            self.moving_mobjects += new_and_foreground_mobjects
         return self
 
     def add_mobjects_from_animations(self, animations: list[Animation]) -> None:
@@ -661,32 +606,9 @@ class Scene:
         *mobjects
             The mobjects to remove.
         """
-        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
-            mobjects_to_remove = []
-            meshes_to_remove: set[Any] = set()
-            mobject_or_mesh: Mobject
-            for mobject_or_mesh in mobjects:
-                if isinstance(mobject_or_mesh, Mobject):
-                    mobjects_to_remove.append(mobject_or_mesh)
-                else:
-                    meshes_to_remove.add(mobject_or_mesh)
-            self.mobjects = restructure_list_to_exclude_certain_family_members(
-                self.mobjects,
-                mobjects_to_remove,
-            )
-
-            def lambda_function(mesh: Any) -> bool:
-                return mesh not in meshes_to_remove
-
-            self.meshes = list(
-                filter(lambda_function, self.meshes),
-            )
-            return self
-        else:
-            assert config.renderer == RendererType.CAIRO
-            for list_name in "mobjects", "foreground_mobjects":
-                self.restructure_mobjects(mobjects, list_name, False)
-            return self
+        for list_name in "mobjects", "foreground_mobjects":
+            self.restructure_mobjects(mobjects, list_name, False)
+        return self
 
     def replace(self, old_mobject: Mobject, new_mobject: Mobject) -> None:
         """Replace one mobject in the scene with another, preserving draw order.
@@ -1000,7 +922,6 @@ class Scene:
         """
         self.mobjects = []
         self.foreground_mobjects = []
-        self.meshes = []
         return self
 
     def get_moving_mobjects(self, *animations: Animation) -> list[Mobject]:
@@ -1027,8 +948,8 @@ class Scene:
 
         def _collect_animation_mobjects(
             nested_animations: Iterable[Animation],
-        ) -> list[Mobject | OpenGLMobject]:
-            animation_mobjects: list[Mobject | OpenGLMobject] = []
+        ) -> list[Mobject]:
+            animation_mobjects: list[Mobject] = []
             for anim in nested_animations:
                 # Keep composition wrappers as conservative boundaries for the
                 # static frame cache, in addition to their nested animations.
@@ -1398,16 +1319,11 @@ class Scene:
             animation._setup_scene(self)
             animation.begin()
 
-        if config.renderer in (
-            RendererType.CAIRO,
-            RendererType.OPENGL,
-            RendererType.VULKAN,
-        ):
-            # Identify mobjects whose pixels can be reused between frames.
-            (
-                self.moving_mobjects,
-                self.static_mobjects,
-            ) = self.get_moving_and_static_mobjects(self.animations)
+        # Identify mobjects whose pixels can be reused between frames.
+        (
+            self.moving_mobjects,
+            self.static_mobjects,
+        ) = self.get_moving_and_static_mobjects(self.animations)
 
     def is_current_animation_frozen_frame(self) -> bool:
         """Returns whether the current animation produces a static frame (generally a Wait)."""
@@ -1455,86 +1371,6 @@ class Scene:
             "the window is read-only and does not forward mouse or keyboard events."
         )
         return
-        if not self.check_interactive_embed_is_valid():
-            return
-        self.interactive_mode = True
-        from IPython.terminal.embed import InteractiveShellEmbed
-
-        def ipython(shell: InteractiveShellEmbed, namespace: dict[str, Any]) -> None:
-            import manim.opengl
-
-            def load_module_into_namespace(
-                module: Any, namespace: dict[str, Any]
-            ) -> None:
-                for name in dir(module):
-                    namespace[name] = getattr(module, name)
-
-            load_module_into_namespace(manim, namespace)
-            load_module_into_namespace(manim.opengl, namespace)
-
-            def embedded_rerun(*args: Any, **kwargs: Any) -> None:
-                self.queue.put(SceneInteractRerun("keyboard"))
-                shell.exiter()
-
-            namespace["rerun"] = embedded_rerun
-
-            shell(local_ns=namespace)
-            self.queue.put(SceneInteractContinue("keyboard"))
-
-        def get_embedded_method(method_name: str) -> Callable[..., None]:
-            method = getattr(self, method_name)
-
-            def embedded_method(*args: Any, **kwargs: Any) -> None:
-                self.queue.put(MethodWithArgs(method, args, kwargs))
-
-            return embedded_method
-
-        currentframe: FrameType = inspect.currentframe()  # type: ignore[assignment]
-        local_namespace = currentframe.f_back.f_locals  # type: ignore[union-attr]
-        for method in ("play", "wait", "add", "remove"):
-            embedded_method = get_embedded_method(method)
-            # Allow for calling scene methods without prepending 'self.'.
-            local_namespace[method] = embedded_method
-
-        from sqlite3 import connect
-
-        from IPython.core.getipython import get_ipython
-        from traitlets.config import Config
-
-        cfg = Config()
-        cfg.TerminalInteractiveShell.confirm_exit = False
-        if get_ipython() is None:
-            shell = InteractiveShellEmbed.instance(config=cfg)
-        else:
-            shell = InteractiveShellEmbed(config=cfg)
-        hist = get_ipython().history_manager
-        hist.db = connect(hist.hist_file, check_same_thread=False)
-
-        keyboard_thread = threading.Thread(
-            target=ipython,
-            args=(shell, local_namespace),
-        )
-        # run as daemon to kill thread when main thread exits
-        if not shell.pt_app:
-            keyboard_thread.daemon = True
-        keyboard_thread.start()
-
-        if self.dearpygui_imported and config.enable_gui:
-            if not dpg.is_dearpygui_running():
-                gui_thread = threading.Thread(
-                    target=self._configure_pygui,
-                    kwargs={"update": False},
-                )
-                gui_thread.start()
-            else:
-                self._configure_pygui(update=True)
-
-        if hasattr(self.camera, "model_matrix"):
-            self.camera.model_matrix = self.camera.default_model_matrix
-
-        self.interact(shell, keyboard_thread)
-
-    # from IPython.terminal.embed import InteractiveShellEmbed
 
     def interact(self, shell: Any, keyboard_thread: threading.Thread) -> None:
         if self.manager is not None:
@@ -1597,7 +1433,6 @@ class Scene:
                 last_time = time.time()
                 self._get_manager()._render_preview_frame(dt)
                 self.update_mobjects(dt)
-                self.update_meshes(dt)
                 self.update_self(dt)
 
         # Join the keyboard thread if necessary.
@@ -1611,8 +1446,6 @@ class Scene:
         file_observer.stop()
         file_observer.join()
 
-        if self.dearpygui_imported and config.enable_gui:
-            dpg.stop_dearpygui()
 
         if self.renderer.window is not None and self.renderer.window.is_closing:
             self.renderer.window.destroy()
@@ -1664,71 +1497,6 @@ class Scene:
         # End scene when exiting an embed.
         raise Exception("Exiting scene.")
 
-    def _configure_pygui(self, update: bool = True) -> None:
-        if not self.dearpygui_imported:
-            raise RuntimeError("Attempted to use DearPyGUI when it isn't imported.")
-        if update:
-            dpg.delete_item(window)
-        else:
-            dpg.create_viewport()
-            dpg.setup_dearpygui()
-            dpg.show_viewport()
-
-        dpg.set_viewport_title(title=f"Manim Community v{__version__}")
-        dpg.set_viewport_width(1015)
-        dpg.set_viewport_height(540)
-
-        def rerun_callback(sender: Any, data: Any) -> None:
-            self.queue.put(SceneInteractRerun("gui"))
-
-        def continue_callback(sender: Any, data: Any) -> None:
-            self.queue.put(SceneInteractContinue("gui"))
-
-        def scene_selection_callback(sender: Any, data: Any) -> None:
-            config.scene_names = [dpg.get_value(sender)]
-            self.queue.put(SceneInteractRerun("gui"))
-
-        scene_classes = scene_classes_from_file(Path(config.input_file), full_list=True)  # type: ignore[call-overload]
-        scene_names = [scene_class.__name__ for scene_class in scene_classes]
-
-        with dpg.window(
-            id=window,
-            label="Manim GUI",
-            pos=[config.gui_location[0], config.gui_location[1]],
-            width=1000,
-            height=500,
-        ):
-            dpg.set_global_font_scale(2)
-            dpg.add_button(label="Rerun", callback=rerun_callback)
-            dpg.add_button(label="Continue", callback=continue_callback)
-            dpg.add_combo(
-                label="Selected scene",
-                items=scene_names,
-                callback=scene_selection_callback,
-                default_value=config.scene_names[0],
-            )
-            dpg.add_separator()
-            if len(self.widgets) != 0:
-                with dpg.collapsing_header(
-                    label=f"{config.scene_names[0]} widgets",
-                    default_open=True,
-                ):
-                    for widget_config in self.widgets:
-                        widget_config_copy = widget_config.copy()
-                        name = widget_config_copy["name"]
-                        widget = widget_config_copy["widget"]
-                        if widget != "separator":
-                            del widget_config_copy["name"]
-                            del widget_config_copy["widget"]
-                            getattr(dpg, f"add_{widget}")(
-                                label=name, **widget_config_copy
-                            )
-                        else:
-                            dpg.add_separator()
-
-        if not update:
-            dpg.start_dearpygui()
-
     def update_to_time(self, t: float) -> None:
         dt = t - self.last_t
         self.last_t = t
@@ -1739,7 +1507,6 @@ class Scene:
             alpha = t / animation.run_time if animation.run_time > 0 else 1.0
             animation.interpolate(alpha)
         self.update_mobjects(dt)
-        self.update_meshes(dt)
         self.update_self(dt)
 
     def add_subcaption(
@@ -1846,53 +1613,22 @@ class Scene:
         """
         self._get_manager().add_sound(sound_file, time_offset, gain, gain_to_background)
 
-    def _require_legacy_interaction(self) -> None:
-        """Raise when legacy OpenGL camera interaction is not available."""
-        from ..renderer.opengl.camera import OpenGLCamera
-        from ..renderer.opengl.renderer import OpenGLRenderer
-
-        if not isinstance(self.camera, OpenGLCamera) or not isinstance(
-            self.renderer, OpenGLRenderer
-        ):
-            raise RuntimeError(
-                "Mouse and keyboard camera controls require the retired "
-                "OpenGL renderer; the Vulkan backend does not forward input yet.",
-            )
-
     def on_mouse_motion(self, point: Point3D, d_point: Point3D) -> None:
-        self._require_legacy_interaction()
         self.mouse_point.move_to(point)
-        if SHIFT_VALUE in self.renderer.pressed_keys:
-            shift = -d_point
-            shift[0] *= self.camera.get_width() / 2
-            shift[1] *= self.camera.get_height() / 2
-            transform = self.camera.inverse_rotation_matrix
-            shift = np.dot(np.transpose(transform), shift)
-            self.camera.shift(shift)
 
     def on_mouse_scroll(self, point: Point3D, offset: Point3D) -> None:
-        self._require_legacy_interaction()
-        if not config.use_projection_stroke_shaders:
-            factor = 1 + np.arctan(-2.1 * offset[1])
-            self.camera.scale(factor, about_point=self.camera_target)
-        self.mouse_scroll_orbit_controls(point, offset)
+        pass
 
     def on_key_press(self, symbol: int, modifiers: int) -> None:
-        self._require_legacy_interaction()
         try:
             char = chr(symbol)
         except OverflowError:
             logger.warning("The value of the pressed key is too large.")
             return
-
-        if char == "r":
-            self.camera.to_default_state()
-            self.camera_target = np.array([0, 0, 0], dtype=np.float32)
-        elif char == "q":
+        if char == "q":
             self.quit_interaction = True
-        else:
-            if char in self.key_to_function_map:
-                self.key_to_function_map[char]()
+        elif char in self.key_to_function_map:
+            self.key_to_function_map[char]()
 
     def on_key_release(self, symbol: int, modifiers: int) -> None:
         pass
@@ -1904,108 +1640,7 @@ class Scene:
         buttons: int,
         modifiers: int,
     ) -> None:
-        self._require_legacy_interaction()
         self.mouse_drag_point.move_to(point)
-        if buttons == 1:
-            self.camera.increment_theta(-d_point[0])
-            self.camera.increment_phi(d_point[1])
-        elif buttons == 4:
-            camera_x_axis = self.camera.model_matrix[:3, 0]
-            horizontal_shift_vector = -d_point[0] * camera_x_axis
-            vertical_shift_vector = -d_point[1] * np.cross(OUT, camera_x_axis)
-            total_shift_vector = horizontal_shift_vector + vertical_shift_vector
-            self.camera.shift(1.1 * total_shift_vector)
-
-        self.mouse_drag_orbit_controls(point, d_point, buttons, modifiers)
-
-    def mouse_scroll_orbit_controls(self, point: Point3D, offset: Point3D) -> None:
-        self._require_legacy_interaction()
-        camera_to_target = self.camera_target - self.camera.get_position()
-        camera_to_target *= np.sign(offset[1])
-        shift_vector = 0.01 * camera_to_target
-        self.camera.model_matrix = (
-            opengl.translation_matrix(*shift_vector) @ self.camera.model_matrix
-        )
-
-    def mouse_drag_orbit_controls(
-        self,
-        point: Point3D,
-        d_point: Point3D,
-        buttons: int,
-        modifiers: int,
-    ) -> None:
-        self._require_legacy_interaction()
-        # Left click drag.
-        if buttons == 1:
-            # Translate to target the origin and rotate around the z axis.
-            self.camera.model_matrix = (
-                opengl.rotation_matrix(z=-d_point[0])
-                @ opengl.translation_matrix(*-self.camera_target)
-                @ self.camera.model_matrix
-            )
-
-            # Rotation off of the z axis.
-            camera_position = self.camera.get_position()
-            camera_y_axis = self.camera.model_matrix[:3, 1]
-            axis_of_rotation = space_ops.normalize(
-                np.cross(camera_y_axis, camera_position),
-            )
-            rotation_matrix = space_ops.rotation_matrix(
-                d_point[1],
-                axis_of_rotation,
-                homogeneous=True,
-            )
-
-            maximum_polar_angle = self.camera.maximum_polar_angle
-            minimum_polar_angle = self.camera.minimum_polar_angle
-
-            potential_camera_model_matrix = rotation_matrix @ self.camera.model_matrix
-            potential_camera_location = potential_camera_model_matrix[:3, 3]
-            potential_camera_y_axis = potential_camera_model_matrix[:3, 1]
-            sign = (
-                np.sign(potential_camera_y_axis[2])
-                if potential_camera_y_axis[2] != 0
-                else 1
-            )
-            potential_polar_angle = sign * np.arccos(
-                potential_camera_location[2]
-                / np.linalg.norm(potential_camera_location),
-            )
-            if minimum_polar_angle <= potential_polar_angle <= maximum_polar_angle:
-                self.camera.model_matrix = potential_camera_model_matrix
-            else:
-                sign = np.sign(camera_y_axis[2]) if camera_y_axis[2] != 0 else 1
-                current_polar_angle = sign * np.arccos(
-                    camera_position[2] / np.linalg.norm(camera_position),
-                )
-                if potential_polar_angle > maximum_polar_angle:
-                    polar_angle_delta = maximum_polar_angle - current_polar_angle
-                else:
-                    polar_angle_delta = minimum_polar_angle - current_polar_angle
-                rotation_matrix = space_ops.rotation_matrix(
-                    polar_angle_delta,
-                    axis_of_rotation,
-                    homogeneous=True,
-                )
-                self.camera.model_matrix = rotation_matrix @ self.camera.model_matrix
-
-            # Translate to target the original target.
-            self.camera.model_matrix = (
-                opengl.translation_matrix(*self.camera_target)
-                @ self.camera.model_matrix
-            )
-        # Right click drag.
-        elif buttons == 4:
-            camera_x_axis = self.camera.model_matrix[:3, 0]
-            horizontal_shift_vector = -d_point[0] * camera_x_axis
-            vertical_shift_vector = -d_point[1] * np.cross(OUT, camera_x_axis)
-            total_shift_vector = horizontal_shift_vector + vertical_shift_vector
-
-            self.camera.model_matrix = (
-                opengl.translation_matrix(*total_shift_vector)
-                @ self.camera.model_matrix
-            )
-            self.camera_target += total_shift_vector
 
     def set_key_function(self, char: str, func: Callable[[], Any]) -> None:
         self.key_to_function_map[char] = func

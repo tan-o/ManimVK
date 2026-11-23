@@ -13,14 +13,13 @@ import svgelements as se
 from manim import config, logger
 from manim.utils.color import ManimColor, ParsableManimColor
 
-from ...constants import RIGHT, RendererType
+from ...constants import RIGHT
 from ...utils.bezier import get_quadratic_approximation_of_cubic
 from ...utils.images import get_full_vector_image_path
 from ...utils.iterables import hash_obj
 from ..geometry.arc import Circle
 from ..geometry.line import Line
 from ..geometry.polygram import Polygon, Rectangle, RoundedRectangle
-from ..opengl.opengl_compatibility import ConvertToOpenGL
 from ..types.vectorized_mobject import VGroup, VMobject
 
 __all__ = ["SVGMobject", "VMobjectFromSVGPath"]
@@ -33,7 +32,7 @@ def _convert_point_to_3d(x: float, y: float) -> np.ndarray:
     return np.array([x, y, 0.0])
 
 
-class SVGMobject(VMobject, metaclass=ConvertToOpenGL):
+class SVGMobject(VMobject):
     """A vectorized mobject created from importing an SVG file.
 
     Parameters
@@ -501,14 +500,8 @@ class SVGMobject(VMobject, metaclass=ConvertToOpenGL):
         return self
 
 
-class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
+class VMobjectFromSVGPath(VMobject):
     """A vectorized mobject representing an SVG path.
-
-    .. note::
-
-        The ``long_lines``, ``should_subdivide_sharp_curves``,
-        and ``should_remove_null_curves`` keyword arguments are
-        only respected with the OpenGL renderer.
 
     Parameters
     ----------
@@ -517,12 +510,6 @@ class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
     long_lines
         Whether or not straight lines in the vectorized mobject
         are drawn in one or two segments.
-    should_subdivide_sharp_curves
-        Whether or not to subdivide subcurves further in case
-        two segments meet at an angle that is sharper than a
-        given threshold.
-    should_remove_null_curves
-        Whether or not to remove subcurves of length 0.
     kwargs
         Further keyword arguments are passed to the parent
         class.
@@ -532,8 +519,6 @@ class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
         self,
         path_obj: se.Path,
         long_lines: bool = False,
-        should_subdivide_sharp_curves: bool = False,
-        should_remove_null_curves: bool = False,
         **kwargs: Any,
     ):
         # Get rid of arcs
@@ -541,17 +526,7 @@ class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
         self.path_obj = path_obj
 
         self.long_lines = long_lines
-        self.should_subdivide_sharp_curves = should_subdivide_sharp_curves
-        self.should_remove_null_curves = should_remove_null_curves
 
-        if config.renderer == RendererType.OPENGL:
-            # OpenGLVMobject.__init__ takes these as parameters and would
-            # otherwise reset the attributes above to its own defaults.
-            kwargs.update(
-                long_lines=long_lines,
-                should_subdivide_sharp_curves=should_subdivide_sharp_curves,
-                should_remove_null_curves=should_remove_null_curves,
-            )
 
         super().__init__(**kwargs)
 
@@ -560,17 +535,6 @@ class VMobjectFromSVGPath(VMobject, metaclass=ConvertToOpenGL):
 
         self.handle_commands()
 
-        if config.renderer == RendererType.OPENGL:
-            if self.should_subdivide_sharp_curves:
-                # For a healthy triangulation later
-                self.subdivide_sharp_curves()
-            if self.should_remove_null_curves:
-                # Get rid of any null curves
-                self.set_points(self.get_points_without_null_curves())
-        return self
-
-    def init_points(self) -> Self:
-        self.generate_points()
         return self
 
     def handle_commands(self) -> Self:

@@ -1,4 +1,4 @@
-"""Saved configuration for an OpenGL preview window."""
+"""Saved configuration for the Vulkan preview window."""
 
 from __future__ import annotations
 

@@ -261,9 +261,7 @@ method. Inspecting the corresponding code (see
 reveals that ``Scene.__init__`` first sets several attributes of the scene objects that do not
 depend on any configuration options set in ``config``. Then the scene inspects the value of
 ``config.renderer``, and based on its value instantiates a ``CairoRenderer`` or
-the default ``SkiaRenderer`` (the Vulkan/Skia backend).  The historical
-``opengl`` value is normalized to Vulkan, so the retired moderngl renderer is
-not selectable.  The chosen renderer is exposed by the scene's read-only
+the default ``SkiaRenderer`` (the Vulkan/Skia backend).  The chosen renderer is exposed by the scene's read-only
 ``renderer`` property.
 
 After selecting the renderer, the scene resolves the mutable configuration into

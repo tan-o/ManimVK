@@ -80,11 +80,11 @@ Manim also ships with a `%%manim` IPython magic which allows to use it convenien
 
 ## Vulkan backend
 
-This fork renders through Skia's Ganesh backend on Vulkan by default; Cairo and
-moderngl are no longer required for normal rendering or import.
+This fork renders through Skia's Ganesh backend on Vulkan. The OpenGL renderer
+and its `OpenGL*` mobject family are removed; Cairo is not required for normal
+rendering or import.
 
-- `--renderer vulkan` is the default. The historical `--renderer opengl`
-  spelling is routed to the same Skia/Vulkan backend.
+- `--renderer vulkan` is the default.
 - `--renderer cairo` selects Cairo as an explicit reference backend; install the
   optional dependencies with `pip install manim[legacy]`.
 - Select an adapter with a case-insensitive name substring:

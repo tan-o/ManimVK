@@ -324,7 +324,7 @@ class CairoRenderer(_RendererExecutionView):
 
     @contextlib.contextmanager
     def _scene_images(self) -> Iterator[None]:
-        """See OpenGLRenderer._scene_images; Cairo images are cheap to set up."""
+        """Cairo images are cheap to set up, so each one opens its own renderer."""
         yield
 
     def _get_scene_image(self, scene: Scene) -> Image.Image:

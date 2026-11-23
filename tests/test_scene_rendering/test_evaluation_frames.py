@@ -47,7 +47,7 @@ def settings(backend, tmp_path, output="none"):
     }
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 def test_frames_match_the_rendered_frames(backend, tmp_path, monkeypatch):
     rendered = []
     original = SceneFileWriter.write_frame
@@ -136,20 +136,20 @@ def test_frozen_frames_added_by_the_renderer_are_evaluated(tmp_path):
     assert [(frame.time, frame.frame_index) for frame in received] == [(0.5, 2)]
 
 
-def test_opengl_evaluation_draws_all_frames_with_one_renderer(tmp_path, monkeypatch):
-    from manim.renderer.opengl.renderer import OpenGLRenderer
+def test_vulkan_evaluation_draws_all_frames_with_one_renderer(tmp_path, monkeypatch):
     from manim.renderer.protocol import RendererState
+    from manim.renderer.skia import SkiaRenderer
 
     created = []
-    init = OpenGLRenderer.__init__
+    init = SkiaRenderer.__init__
 
     def count(renderer, *args, **kwargs):
         created.append(renderer)
         init(renderer, *args, **kwargs)
 
-    with tempconfig(settings("opengl", tmp_path)):
+    with tempconfig(settings("vulkan", tmp_path)):
         scene = Motion()
-        monkeypatch.setattr(OpenGLRenderer, "__init__", count)
+        monkeypatch.setattr(SkiaRenderer, "__init__", count)
         received = []
         Manager(scene).evaluate(frame_times=[0, 0.5, 1, 1.5], on_frame=received.append)
     assert len(received) == 4

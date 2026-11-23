@@ -37,7 +37,7 @@ def decoded_audio(path):
     return samples.astype(np.float32)
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 def test_reused_segments_produce_an_identical_audio_track(tmp_path, beep, backend):
     def rendered_audio(media_dir):
         with tempconfig(

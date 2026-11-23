@@ -47,22 +47,6 @@ frame with the usual mobject operations:
             self.play(self.camera.frame.animate.shift(2 * RIGHT).scale(0.5))
             self.play(Restore(self.camera.frame))
 
-Moving the OpenGL camera
-------------------------
-
-With the OpenGL renderer, the camera itself is a mobject. Animate
-``self.camera`` directly to pan or zoom::
-
-    class OpenGLCameraExample(Scene):
-        def construct(self):
-            square = Square().shift(2 * RIGHT)
-            self.add(square)
-            self.play(self.camera.animate.move_to(square))
-            self.play(self.camera.animate.scale(0.5))
-
-Run this example with ``--renderer=opengl``. For orientation controls, see
-:class:`.OpenGLCamera` and :class:`.ThreeDScene`.
-
 Choosing a camera class
 -----------------------
 
@@ -148,8 +132,7 @@ The ``camera`` parameter allows for a different camera to be used to generate
 the image. Without it, a new default :class:`.Camera` is created. To use the
 view of the current camera, pass ``camera=self.camera``.
 
-These standalone helpers are Cairo-specific; use ``scene.get_image()`` for an
-OpenGL scene, including its meshes.
+Inside a running scene, ``scene.get_image()`` returns the current frame.
 
 Three-dimensional and nested views
 ----------------------------------
@@ -170,12 +153,12 @@ magnified region of the scene::
 Multiple camera views
 ---------------------
 
-The Cairo backend supports several camera views within one scene through
+Both renderers support several camera views within one scene through
 :class:`.MultiCamera`. The primary camera draws the overall scene; each
 secondary camera supplies an image displayed by an
 :class:`.ImageMobjectFromCamera` mobject.
 During the execution of the scene, the renderer draws each camera's view into its
-display mobject. This API is not supported by the OpenGL backend.
+display mobject.
 
 There are two independent controls:
 

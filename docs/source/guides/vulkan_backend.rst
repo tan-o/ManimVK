@@ -8,13 +8,13 @@ as an explicit reference rasterizer.
 Default behaviour
 -----------------
 
-``config.renderer`` defaults to ``"vulkan"``.  Both ``--renderer vulkan`` and the
-historical ``--renderer opengl`` spelling select the Skia/Vulkan backend; the old
-moderngl pipeline is retired.  ``--renderer cairo`` is the only way to request
-Cairo.
+``config.renderer`` defaults to ``"vulkan"``.  The OpenGL renderer, the
+``OpenGL*`` mobject family and the GLSL ``Shader``/``Mesh`` API are removed;
+custom effects use :class:`.SkSLMobject`.  ``--renderer cairo`` requests the
+Cairo reference rasterizer.
 
 The renderer keeps one Vulkan device per process and one Skia Ganesh context per
-device.  Vector paths, text, meshes, images, point clouds, background-filled
+device.  Vector paths, text, images, point clouds, background-filled
 shapes and ``MultiCamera`` sub-views all draw and composite on the GPU.  A frame
 is copied to host memory only when a video writer, still image, or preview
 needs pixels.

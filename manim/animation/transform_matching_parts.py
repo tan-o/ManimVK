@@ -10,8 +10,6 @@ import numpy as np
 
 from manim.mobject.text.tex_mobject import MathTexPart
 
-from .._config import config
-from ..constants import RendererType
 from ..mobject.mobject import Group, Mobject
 from ..mobject.types.vectorized_mobject import VGroup, VMobject
 from .composition import AnimationGroup
@@ -144,10 +142,7 @@ class TransformMatchingAbstractBase(AnimationGroup):
         for sm in self.get_mobject_parts(mobject):
             key = self.get_mobject_key(sm)
             if key not in shape_map:
-                if config.renderer == RendererType.OPENGL:
-                    shape_map[key] = VGroup()
-                else:
-                    shape_map[key] = VGroup()
+                shape_map[key] = VGroup()
             # error: Argument 1 to "add" of "VGroup" has incompatible type "Mobject"; expected "VMobject"  [arg-type]
             shape_map[key].add(sm)  # type: ignore[arg-type]
         return shape_map

@@ -610,8 +610,6 @@ class Wait(Animation):
         self.stop_condition = stop_condition
         self.is_static_wait: bool = frozen_frame
         super().__init__(None, run_time=run_time, rate_func=rate_func, **kwargs)
-        # quick fix to work in opengl setting:
-        self.mobject.shader_wrapper_list = []
 
     def begin(self) -> None:
         pass

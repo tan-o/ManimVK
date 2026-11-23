@@ -14,7 +14,7 @@ from manim import (
 RASTER_CALLS = ("render", "get_frame", "_prepare_animation", "_present_frozen_frame")
 
 
-@pytest.fixture(params=["cairo", "opengl"])
+@pytest.fixture(params=["cairo", "vulkan"])
 def settings(request, tmp_path):
     with tempconfig(
         {
@@ -67,8 +67,7 @@ def test_excluded_plays_do_no_raster_work(settings, monkeypatch):
 
 
 def test_cached_plays_do_no_raster_work(settings, monkeypatch):
-    # Only stepped plays here: a frozen wait does not reuse its segment reliably on
-    # OpenGL, which predates this change and would make the assertion backend-specific.
+    # Only stepped plays here: a frozen wait's segment reuse is covered elsewhere.
     class Stepped(Scene):
         def construct(self):
             square = Square(fill_opacity=1)

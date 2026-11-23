@@ -38,7 +38,7 @@ def render(tmp_path, backend, source, *selection, output="png"):
     )
 
 
-@pytest.mark.parametrize("backend", ["cairo", "opengl"])
+@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 def test_scenes_rendered_in_one_run_do_not_share_state(tmp_path, backend):
     result = render(
         tmp_path,

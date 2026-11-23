@@ -27,7 +27,6 @@ from manim.mobject.graphing.functions import ImplicitFunction, ParametricFunctio
 from manim.mobject.graphing.number_line import NumberLine
 from manim.mobject.graphing.scale import LinearBase
 from manim.mobject.mobject import Mobject
-from manim.mobject.opengl.opengl_compatibility import ConvertToOpenGL
 from manim.mobject.text.tex_mobject import MathTex
 from manim.mobject.three_d.three_dimensions import Surface
 from manim.mobject.types.vectorized_mobject import (
@@ -786,11 +785,8 @@ class CoordinateSystem:
                             )
                             color_list.append(mob_color)
                             break
-            if config.renderer == RendererType.OPENGL:
-                graph.set_color(color_list)
-            else:
-                graph.set_stroke(color_list)
-                graph.set_sheen_direction(RIGHT)
+            graph.set_stroke(color_list)
+            graph.set_sheen_direction(RIGHT)
 
         return graph
 
@@ -993,28 +989,17 @@ class CoordinateSystem:
                         )
                     self.add(axes, trig_plane)
         """
-        if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
-            surface = Surface(
-                lambda u, v: self.c2p(u, v, function(u, v)),
-                u_range=u_range,
-                v_range=v_range,
-                **kwargs,
-            )
-            if colorscale:
-                surface.set_fill_by_value(
-                    axes=self.copy(),
-                    colorscale=colorscale,
-                    axis=colorscale_axis,
-                )
-        elif config.renderer == RendererType.OPENGL:
-            surface = Surface(
-                lambda u, v: self.c2p(u, v, function(u, v)),
-                u_range=u_range,
-                v_range=v_range,
+        surface = Surface(
+            lambda u, v: self.c2p(u, v, function(u, v)),
+            u_range=u_range,
+            v_range=v_range,
+            **kwargs,
+        )
+        if colorscale:
+            surface.set_fill_by_value(
                 axes=self.copy(),
                 colorscale=colorscale,
-                colorscale_axis=colorscale_axis,
-                **kwargs,
+                axis=colorscale_axis,
             )
 
         return surface
@@ -1872,7 +1857,7 @@ class CoordinateSystem:
     def _origin_shift(axis_range: Sequence[float]) -> float: ...
 
 
-class Axes(VGroup, CoordinateSystem, metaclass=ConvertToOpenGL):
+class Axes(VGroup, CoordinateSystem):
     """Creates a set of axes.
 
     Parameters
@@ -2435,10 +2420,6 @@ class ThreeDAxes(Axes):
         The number of pieces used to construct the axes.
     light_source
         The direction of the light source.
-    depth
-        Currently non-functional.
-    gloss
-        Currently non-functional.
     kwargs
         Additional arguments to be passed to :class:`Axes`.
     """
@@ -2455,9 +2436,6 @@ class ThreeDAxes(Axes):
         z_normal: Vector3DLike = DOWN,
         num_axis_pieces: int = 20,
         light_source: Point3DLike = 9 * DOWN + 7 * LEFT + 10 * OUT,
-        # opengl stuff (?)
-        depth: Any = None,
-        gloss: float = 0.5,
         **kwargs: dict[str, Any],
     ):
         super().__init__(
@@ -2511,9 +2489,8 @@ class ThreeDAxes(Axes):
         self.add(z_axis)
         self.z_axis = z_axis
 
-        if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
-            self._add_3d_pieces()
-            self._set_axis_shading()
+        self._add_3d_pieces()
+        self._set_axis_shading()
 
     def _add_3d_pieces(self) -> None:
         for axis in self.axes:

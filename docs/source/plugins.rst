@@ -113,21 +113,8 @@ for details) is to include the following in your ``pyproject.toml``:
     system will probably be refactored in the future to provide a more structured
     interface.
 
-A note on Renderer Compatibility
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A note on Renderers
+^^^^^^^^^^^^^^^^^^^
 
-Depending on which renderer is currently active, custom mobjects
-created in your plugin might want to behave differently as the
-corresponding mobject base classes are (unfortunately) not fully
-compatible.
-
-The currently active renderer can be queried by checking the value
-of ``manim.config.renderer``. All possible renderer types are given
-by :class:`.constants.RendererType`. The module :mod:`.manim.mobject.utils`
-contains utility functions that return the base class for the currently
-active renderer.
-
-A simple form of renderer compatibility (by hot-swapping the class
-inheritance chain) for Mobjects directly inheriting from
-:class:`.Mobject` or :class:`.VMobject` can be achieved by using the
-:class:`.mobject.opengl.opengl_compatibility.ConvertToOpenGL` metaclass.
+Manim has a single mobject family drawn by the Vulkan renderer, so a plugin's
+custom mobjects subclass :class:`.Mobject` or :class:`.VMobject` directly.

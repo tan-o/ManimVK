@@ -401,7 +401,7 @@ The ``-p`` flag opens the animation once it is rendered.
 can be combined; Manim reveals the artifact first and then opens it for preview.
 
 The separate ``-l`` (or ``--live-preview``) option asks a capable renderer to
-display frames while rendering. The OpenGL renderer supports this mode. Live
+display frames while rendering. The Vulkan renderer supports this mode. Live
 preview with the default ``--format=auto`` does not produce a media file; you
 must pass a concrete format such as ``--format=mp4`` to display and record
 simultaneously.
