@@ -3,7 +3,7 @@
 日期：2026-11-23  
 仓库：`C:\Users\Feysen\Work\Deepseek\ManimVK`  
 远端：`https://github.com/tan-o/ManimVK`  
-当前 `master`：`bf06d86`（`vulkan-strip` 已合并并推送），其上有本地修复提交 `4082ef5`（尚未推送）  
+当前 `master`：`bf06d86`（`vulkan-strip` 已合并并推送），其上有本地修复提交（尚未推送）  
 本轮性质：审查后的 golden 全量对照 + 根因修复；不是只留一个 Cairo 基线等人接手。
 
 ---
@@ -417,7 +417,7 @@ python $env:TEMP\mvk_fourier\fourier_pi_100.py
 
 ### 9.3 本轮修改的提交状态
 
-已本地提交为 `4082ef5`（`fix: correct Skia camera Y translation and golden renderer semantics`），**尚未推送**。涉及文件：
+已本地提交（`fix: correct Skia camera Y translation and golden renderer semantics`），**尚未推送**。涉及文件：
 
 - `manim/renderer/skia/rendering.py`：点云单次方块、背景图零透明跳过、中心采样描边。
 - `manim/renderer/cairo/rendering.py`：背景图遮罩只乘 alpha。
