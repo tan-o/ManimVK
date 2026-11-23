@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from manim.mobject.opengl.opengl_mobject import OpenGLGroup, OpenGLMobject
-from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVGroup, OpenGLVMobject
 from manim.mobject.text.tex_mobject import MathTexPart
 
 from .._config import config
@@ -77,10 +75,10 @@ class TransformMatchingAbstractBase(AnimationGroup):
         key_map: dict | None = None,
         **kwargs: Any,
     ):
-        if isinstance(mobject, OpenGLVMobject):
-            group_type: type[OpenGLVGroup | OpenGLGroup | VGroup | Group] = OpenGLVGroup
-        elif isinstance(mobject, OpenGLMobject):
-            group_type = OpenGLGroup
+        if isinstance(mobject, VMobject):
+            group_type: type[VGroup | Group | VGroup | Group] = VGroup
+        elif isinstance(mobject, Mobject):
+            group_type = Group
         elif isinstance(mobject, VMobject):
             group_type = VGroup
         else:
@@ -142,15 +140,15 @@ class TransformMatchingAbstractBase(AnimationGroup):
         self.to_add = target_mobject
 
     def get_shape_map(self, mobject: Mobject) -> dict:
-        shape_map: dict[int | str, VGroup | OpenGLVGroup] = {}
+        shape_map: dict[int | str, VGroup | VGroup] = {}
         for sm in self.get_mobject_parts(mobject):
             key = self.get_mobject_key(sm)
             if key not in shape_map:
                 if config.renderer == RendererType.OPENGL:
-                    shape_map[key] = OpenGLVGroup()
+                    shape_map[key] = VGroup()
                 else:
                     shape_map[key] = VGroup()
-            # error: Argument 1 to "add" of "OpenGLVGroup" has incompatible type "Mobject"; expected "OpenGLVMobject"  [arg-type]
+            # error: Argument 1 to "add" of "VGroup" has incompatible type "Mobject"; expected "VMobject"  [arg-type]
             shape_map[key].add(sm)  # type: ignore[arg-type]
         return shape_map
 
@@ -158,7 +156,7 @@ class TransformMatchingAbstractBase(AnimationGroup):
         # Interpolate all animations back to 0 to ensure source mobjects remain unchanged.
         for anim in self.animations:
             anim.interpolate(0)
-        # error: Argument 1 to "remove" of "Scene" has incompatible type "OpenGLMobject"; expected "Mobject"  [arg-type]
+        # error: Argument 1 to "remove" of "Scene" has incompatible type "Mobject"; expected "Mobject"  [arg-type]
         scene.remove(self.mobject)  # type: ignore[arg-type]
         scene.remove(*self.to_remove)
         scene.add(self.to_add)
@@ -285,7 +283,7 @@ class TransformMatchingTex(TransformMatchingAbstractBase):
 
     @staticmethod
     def get_mobject_parts(mobject: Mobject) -> list[Mobject]:
-        if isinstance(mobject, (Group, VGroup, OpenGLGroup, OpenGLVGroup)):
+        if isinstance(mobject, (Group, VGroup, Group, VGroup)):
             return [
                 p
                 for s in mobject.submobjects

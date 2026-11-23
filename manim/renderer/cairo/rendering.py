@@ -8,7 +8,6 @@ from collections.abc import Callable, Iterable
 from functools import reduce
 from typing import TYPE_CHECKING, Any
 
-import cairo
 import numpy as np
 from PIL import Image
 
@@ -34,18 +33,21 @@ if TYPE_CHECKING:
 
     from .camera import Camera
 
+# These values match cairo's LineJoin / LineCap enum values and the constants
+# consumed by the native Skia target.  Keeping them as plain integers avoids a
+# hard import of pycairo when only the Vulkan/Skia renderer is used.
 _LINE_JOIN_MAP = {
-    LineJointType.AUTO: cairo.LineJoin.MITER,  # cairo default; TODO: this could be improved
-    LineJointType.ROUND: cairo.LineJoin.ROUND,
-    LineJointType.BEVEL: cairo.LineJoin.BEVEL,
-    LineJointType.MITER: cairo.LineJoin.MITER,
+    LineJointType.AUTO: 0,  # cairo default; TODO: this could be improved
+    LineJointType.ROUND: 1,
+    LineJointType.BEVEL: 2,
+    LineJointType.MITER: 0,
 }
 
 _CAP_STYLE_MAP = {
-    CapStyleType.AUTO: cairo.LineCap.BUTT,  # cairo default; TODO: this could be improved
-    CapStyleType.ROUND: cairo.LineCap.ROUND,
-    CapStyleType.BUTT: cairo.LineCap.BUTT,
-    CapStyleType.SQUARE: cairo.LineCap.SQUARE,
+    CapStyleType.AUTO: 0,  # cairo default; TODO: this could be improved
+    CapStyleType.ROUND: 1,
+    CapStyleType.BUTT: 0,
+    CapStyleType.SQUARE: 2,
 }
 
 _ImageResolver = Callable[[ImageMobjectFromCamera], np.ndarray | None]
@@ -193,6 +195,8 @@ class _CairoDrawingContext:
 
         points = vmobject.get_gradient_start_and_end_points()
         points = self.camera.transform_points_pre_display(vmobject, points)
+        import cairo
+
         pattern = cairo.LinearGradient(
             *it.chain(*(point[:2] for point in points)),
         )

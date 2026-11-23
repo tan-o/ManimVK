@@ -53,10 +53,27 @@ class SkiaRenderer(CairoRenderer):
             from manim.renderer.vulkan.window import VulkanWindow
             from manim.renderer.vulkan.window_settings import _WindowSettings
 
+            # Create the offscreen device first so the preview can ask wgpu
+            # for the same adapter instead of silently opening a second GPU.
+            self._ensure_device()
             self.window = VulkanWindow(
                 self,
                 _settings=_WindowSettings.from_config(config),
             )
+
+    def _ensure_device(self):
+        if self._vk_device is None:
+            try:
+                self._vk_device = manim_vk.Device("ManimCE")
+            except Exception as error:
+                raise RuntimeError(
+                    "Unable to create a Vulkan device. Install a working Vulkan "
+                    "driver (NVIDIA/AMD/Intel) or a software ICD such as lavapipe/"
+                    "SwiftShader, and optionally select an adapter with "
+                    "MANIM_VK_DEVICE."
+                ) from error
+            logger.info("Vulkan render device: %s", self._vk_device.device_name())
+        return self._vk_device
 
     def _target_for(
         self,
@@ -64,13 +81,11 @@ class SkiaRenderer(CairoRenderer):
         *,
         image_files: _ImageFiles,
     ) -> SkiaRenderTarget:
-        if self._vk_device is None:
-            self._vk_device = manim_vk.Device("ManimCE")
-            logger.info("Vulkan render device: %s", self._vk_device.device_name())
+        device = self._ensure_device()
         target = SkiaRenderTarget(
             settings,
             image_files,
-            device=self._vk_device,
+            device=device,
         )
         self._skia_targets.append(target)
         return target
@@ -135,7 +150,7 @@ class SkiaRenderer(CairoRenderer):
             raise RuntimeError("Skia camera views cannot contain a composition cycle.")
         next_stack = (*camera_stack, camera_id)
         mobject_list = list(mobjects)
-        camera_view_pixels: dict[int, RGBAPixelArray] = {}
+        camera_view_targets: dict[int, SkiaRenderTarget] = {}
 
         if isinstance(camera, MultiCamera):
             for image_mobject in camera.image_mobjects_from_cameras:
@@ -157,19 +172,27 @@ class SkiaRenderer(CairoRenderer):
                     excluded_mobjects=sub_excluded_mobjects,
                     camera_stack=next_stack,
                 )
-                # A composition needs the sub-camera image as CPU pixels;
-                # normal single-camera frames stay on the GPU until get_frame().
-                sub_target.commit()
-                camera_view_pixels[id(image_mobject)] = sub_target.pixels
-                camera_view_pixels[id(image_mobject.camera)] = sub_target.pixels
+                # Keep the finished sub-camera surface on the GPU; the parent
+                # target samples it as a texture during composition.
+                camera_view_targets[id(image_mobject)] = sub_target
+                camera_view_targets[id(image_mobject.camera)] = sub_target
+                # ``_draw_frame`` prunes sub-targets that are absent from this
+                # bookkeeping dict.  Register the view without materialising
+                # pixels; the resolver below returns the GPU target itself.
+                self._camera_view_pixels[id(image_mobject)] = None
+                self._camera_view_pixels[id(image_mobject.camera)] = None
 
         def resolve_image(
             image_mobject: ImageMobjectFromCamera,
-        ) -> RGBAPixelArray | None:
-            pixels = self._camera_view_pixels.get(id(image_mobject))
-            if pixels is None:
-                pixels = camera_view_pixels.get(id(image_mobject.camera))
-            return pixels
+        ) -> SkiaRenderTarget | RGBAPixelArray | None:
+            target = camera_view_targets.get(id(image_mobject))
+            if target is None:
+                target = camera_view_targets.get(id(image_mobject.camera))
+            if target is not None:
+                return target
+            return self._camera_view_pixels.get(id(image_mobject)) or self._camera_view_pixels.get(
+                id(image_mobject.camera)
+            )
 
         SkiaDrawingContext(
             camera=camera,
@@ -195,17 +218,17 @@ class SkiaRenderer(CairoRenderer):
         excluded_mobjects: list[Mobject] | None = None,
     ) -> None:
         """Draw classic mobjects and then any public ``Mesh`` objects."""
-        from manim.renderer.opengl.shader import Object3D
-
         if mobjects is None:
             mobjects = list_update(scene.mobjects, scene.foreground_mobjects)
         classic_mobjects: list[Mobject] = []
-        mesh_roots: list[Object3D] = []
+        mesh_roots: list[Any] = []
         for mob in mobjects:
-            if isinstance(mob, Object3D):
-                mesh_roots.append(mob)
-            else:
+            # Mesh/Object3D lives outside the classic Mobject hierarchy and
+            # dragging in manim.renderer.opengl.shader would import moderngl.
+            if isinstance(mob, Mobject):
                 classic_mobjects.append(mob)
+            elif hasattr(mob, "attributes") or hasattr(mob, "model_matrix"):
+                mesh_roots.append(mob)
         for mesh in getattr(scene, "meshes", []):
             if mesh not in mesh_roots:
                 mesh_roots.append(mesh)

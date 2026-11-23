@@ -52,6 +52,8 @@ coverage.xml
 .pytest_cache/
 
 *.log
+*.spv
+*.whl
 
 # Sphinx documentation
 docs/_build/

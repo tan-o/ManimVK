@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from manim.mobject.opengl.opengl_compatibility import ConvertToOpenGL
-from manim.mobject.opengl.opengl_point_cloud_mobject import OpenGLPMobject
 
 from ...constants import *
 from ...mobject.mobject import Mobject
@@ -308,7 +307,7 @@ class PGroup(PMobject):
     """
 
     def __init__(self, *pmobs: Any, **kwargs: Any) -> None:
-        if not all(isinstance(m, (PMobject, OpenGLPMobject)) for m in pmobs):
+        if not all(isinstance(m, PMobject) for m in pmobs):
             raise ValueError(
                 "All submobjects must be of type PMobject or OpenGLPMObject"
                 " if using the opengl renderer",

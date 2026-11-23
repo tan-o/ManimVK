@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import cairo
 import numpy as np
 from PIL import Image
 
@@ -185,6 +184,8 @@ class _CairoRenderTarget:
         )
         if self._context is not None and self._context_key == view_key:
             return self._context
+
+        import cairo
 
         surface = cairo.ImageSurface.create_for_data(
             self._pixels.data,

@@ -62,8 +62,7 @@ from .mobject.graphing.scale import *
 from .mobject.logo import *
 from .mobject.matrix import *
 from .mobject.mobject import *
-from .mobject.opengl.dot_cloud import *
-from .mobject.opengl.opengl_point_cloud_mobject import *
+from .mobject.sksl import *
 from .mobject.svg.brace import *
 from .mobject.svg.svg_mobject import *
 from .mobject.table import *
@@ -80,7 +79,7 @@ from .mobject.types.point_cloud_mobject import *
 from .mobject.types.vectorized_mobject import *
 from .mobject.value_tracker import *
 from .mobject.vector_field import *
-from .renderer.cairo import *
+from .renderer.cairo.camera import *
 from .scene.moving_camera_scene import *
 from .scene.scene import *
 from .scene.scene_file_writer import *
@@ -118,3 +117,14 @@ if "IPython" in _sys.modules:
             ipy.register_magics(ManimMagic)
 
 from .plugins import *
+
+
+def __getattr__(name: str):
+    # Keep the reference Cairo backend importable without paying for pycairo
+    # during a normal Vulkan/Skia import.
+    if name == "CairoRenderer":
+        from .renderer.cairo import CairoRenderer
+
+        globals()[name] = CairoRenderer
+        return CairoRenderer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

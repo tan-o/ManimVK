@@ -13,7 +13,6 @@ from manim._config.render_session import resolve_render_session
 from manim._config.utils import ManimConfig
 from manim.cli.render.commands import render
 from manim.constants import RendererType
-from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVMobject
 from manim.mobject.types.vectorized_mobject import VMobject
 from manim.renderer.protocol import RendererCapabilities
 from tests.assert_utils import assert_dir_filled, assert_file_exists
@@ -64,12 +63,12 @@ def test_max_files_cached_uses_minus_one_for_unlimited(config):
 
 def test_tempconfig_restores_renderer_class_bases(config):
     with tempconfig({"renderer": "opengl"}):
-        assert config.renderer == RendererType.OPENGL
-        assert issubclass(Vector, OpenGLVMobject)
+        # ``opengl`` is a compatibility spelling for the Vulkan/Skia backend.
+        assert config.renderer == RendererType.VULKAN
+        assert issubclass(Vector, VMobject)
 
     assert config.renderer == RendererType.CAIRO
     assert issubclass(Vector, VMobject)
-    assert not issubclass(Vector, OpenGLVMobject)
     Vector(RIGHT)
 
 
@@ -409,7 +408,7 @@ def test_opengl_cli_no_longer_disables_automatic_output(tmp_path, config):
     config.format = "auto"
     config.digest_args(result.return_value)
 
-    assert config.renderer is RendererType.OPENGL
+    assert config.renderer is RendererType.VULKAN
     assert config.format == "auto"
     assert _resolve_output(config).format is OutputFormat.MP4
 

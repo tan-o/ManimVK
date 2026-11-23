@@ -11,7 +11,6 @@ from manim._config import config
 from manim.animation.animation import Animation, prepare_animation
 from manim.constants import RendererType
 from manim.mobject.mobject import Group, Mobject
-from manim.mobject.opengl.opengl_mobject import OpenGLGroup, OpenGLMobject
 from manim.scene.scene import Scene
 from manim.utils.iterables import remove_list_redundancies
 from manim.utils.parameter_parsing import flatten_iterable_parameters
@@ -54,7 +53,7 @@ class AnimationGroup(Animation):
     def __init__(
         self,
         *animations: Animation | Iterable[Animation],
-        group: Group | VGroup | OpenGLGroup | OpenGLVGroup | None = None,
+        group: Group | VGroup | Group | OpenGLVGroup | None = None,
         run_time: float | None = None,
         rate_func: Callable[[float], float] = linear,
         lag_ratio: float = 0,
@@ -68,7 +67,7 @@ class AnimationGroup(Animation):
                 [anim.mobject for anim in self.animations if not anim.is_introducer()],
             )
             if config.renderer == RendererType.OPENGL:
-                self.group: Group | VGroup | OpenGLGroup | OpenGLVGroup = OpenGLGroup(
+                self.group: Group | VGroup | Group | OpenGLVGroup = Group(
                     *mobjects
                 )
             else:
@@ -80,7 +79,7 @@ class AnimationGroup(Animation):
         )
         self.run_time: float = self.init_run_time(run_time)
 
-    def get_all_mobjects(self) -> Sequence[Mobject | OpenGLMobject]:
+    def get_all_mobjects(self) -> Sequence[Mobject | Mobject]:
         return list(self.group)
 
     def begin(self) -> None:

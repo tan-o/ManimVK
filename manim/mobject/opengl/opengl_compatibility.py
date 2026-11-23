@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 from abc import ABCMeta
-from typing import Any
-
-from manim import config
-from manim.mobject.opengl.opengl_mobject import OpenGLMobject
-from manim.mobject.opengl.opengl_point_cloud_mobject import OpenGLPMobject
-from manim.mobject.opengl.opengl_three_dimensions import OpenGLSurface
-from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVMobject
-
-from ...constants import RendererType
+from typing import TYPE_CHECKING, Any
 
 __all__ = ["ConvertToOpenGL"]
 
+if TYPE_CHECKING:
+    from manim.mobject.opengl.opengl_mobject import OpenGLMobject
+    from manim.mobject.opengl.opengl_point_cloud_mobject import OpenGLPMobject
+    from manim.mobject.opengl.opengl_three_dimensions import OpenGLSurface
+    from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVMobject
+
 
 class ConvertToOpenGL(ABCMeta):
-    """Metaclass for swapping (V)Mobject with its OpenGL counterpart at runtime
-    depending on config.renderer. This metaclass should only need to be inherited
-    on the lowest order inheritance classes such as Mobject and VMobject.
+    """Compatibility metaclass retained for the classic mobject hierarchy.
+
+    The Vulkan/Skia backend renders the classic mobject family.  The former
+    runtime swap to ``OpenGL*`` classes was part of the retired moderngl
+    backend, so the metaclass no longer converts classes based on
+    ``config.renderer``.
     """
 
     _converted_classes: list[type] = []
@@ -25,24 +26,6 @@ class ConvertToOpenGL(ABCMeta):
     def __new__(
         mcls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]
     ) -> type:
-        # The Vulkan backend renders the classic mobject family.  Only the
-        # explicit OpenGL renderer should swap in OpenGL classes.
-        if config.renderer == RendererType.OPENGL:
-            # Must check class names to prevent
-            # cyclic importing.
-            base_names_to_opengl: dict[str, type] = {
-                "Mobject": OpenGLMobject,
-                "VMobject": OpenGLVMobject,
-                "PMobject": OpenGLPMobject,
-                "Mobject1D": OpenGLPMobject,
-                "Mobject2D": OpenGLPMobject,
-                "Surface": OpenGLSurface,
-            }
-
-            bases = tuple(
-                base_names_to_opengl.get(base.__name__, base) for base in bases
-            )
-
         return super().__new__(mcls, name, bases, namespace)
 
     def __init__(cls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]):

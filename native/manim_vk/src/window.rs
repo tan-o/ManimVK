@@ -13,9 +13,11 @@ use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId};
+use winit::monitor::MonitorHandle;
+use winit::window::{Fullscreen, Window, WindowId};
 
 #[derive(Clone, Copy, Debug)]
 enum UserEvent {
@@ -23,14 +25,70 @@ enum UserEvent {
     Close,
 }
 
+/// Map Manim's Y/X position spellings (``UR``, ``LEFT``, ``0,0``) to a
+/// physical top-left window position on the selected monitor.
+fn initial_position(
+    monitor: &MonitorHandle,
+    width: u32,
+    height: u32,
+    spec: &str,
+) -> Option<PhysicalPosition<i32>> {
+    if spec.is_empty() {
+        return None;
+    }
+    if let Some((x, y)) = spec.split_once(',') {
+        let x = x.trim().parse::<i32>().ok()?;
+        let y = y.trim().parse::<i32>().ok()?;
+        return Some(PhysicalPosition::new(x, y));
+    }
+    let normalized = match spec {
+        "LEFT" => "OL".to_string(),
+        "RIGHT" => "OR".to_string(),
+        "UP" => "UO".to_string(),
+        "DOWN" => "DO".to_string(),
+        "ORIGIN" | "CENTER" => "OO".to_string(),
+        other if other.len() == 2 => other.to_ascii_uppercase(),
+        _ => return None,
+    };
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() != 2 {
+        return None;
+    }
+    let y_frac = match chars[0] {
+        'U' => 0.0,
+        'O' => 0.5,
+        'D' => 1.0,
+        _ => return None,
+    };
+    let x_frac = match chars[1] {
+        'L' => 0.0,
+        'O' => 0.5,
+        'R' => 1.0,
+        _ => return None,
+    };
+    let area = monitor.size();
+    let origin = monitor.position();
+    let free_x = (area.width as i32 - width as i32).max(0);
+    let free_y = (area.height as i32 - height as i32).max(0);
+    Some(PhysicalPosition::new(
+        origin.x + (x_frac * free_x as f64) as i32,
+        origin.y + (y_frac * free_y as f64) as i32,
+    ))
+}
+
 struct PreviewApp {
     width: u32,
     height: u32,
     title: String,
+    fullscreen: bool,
+    position: String,
+    monitor: usize,
+    requested_adapter: String,
     proxy: EventLoopProxy<UserEvent>,
     closing: Arc<AtomicBool>,
     pending: Arc<Mutex<Option<Vec<u8>>>>,
     adapter_name: Arc<Mutex<String>>,
+    error: Arc<Mutex<Option<String>>>,
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
 }
@@ -53,14 +111,34 @@ impl ApplicationHandler<UserEvent> for PreviewApp {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        if !self.requested_adapter.is_empty() {
+            // pixels/wgpu honors this variable when requesting an adapter.
+            // It lets preview present on the same GPU as the offscreen
+            // renderer on dual-GPU machines.
+            std::env::set_var("WGPU_ADAPTER_NAME", &self.requested_adapter);
+        }
+        let monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+        let monitor = monitors
+            .get(self.monitor.min(monitors.len().saturating_sub(1)))
+            .cloned();
+        let mut attributes = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
+            .with_inner_size(PhysicalSize::new(self.width, self.height))
             .with_resizable(true);
+        if self.fullscreen {
+            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(monitor.clone())));
+        } else if let Some(monitor) = monitor.as_ref() {
+            if let Some(position) = initial_position(monitor, self.width, self.height, &self.position) {
+                attributes = attributes.with_position(position);
+            }
+        }
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 eprintln!("manim_vk preview: failed to create window: {error}");
+                if let Ok(mut slot) = self.error.lock() {
+                    *slot = Some(format!("failed to create preview window: {error}"));
+                }
                 self.closing.store(true, Ordering::SeqCst);
                 event_loop.exit();
                 return;
@@ -86,6 +164,9 @@ impl ApplicationHandler<UserEvent> for PreviewApp {
             }
             Err(error) => {
                 eprintln!("manim_vk preview: failed to create Vulkan surface: {error}");
+                if let Ok(mut slot) = self.error.lock() {
+                    *slot = Some(format!("failed to create Vulkan preview surface: {error}"));
+                }
                 self.closing.store(true, Ordering::SeqCst);
                 event_loop.exit();
                 return;
@@ -144,6 +225,7 @@ pub struct NativeWindow {
     closing: Arc<AtomicBool>,
     pending: Arc<Mutex<Option<Vec<u8>>>>,
     adapter_name: Arc<Mutex<String>>,
+    error: Arc<Mutex<Option<String>>>,
     width: u32,
     height: u32,
     thread: Option<JoinHandle<()>>,
@@ -152,20 +234,32 @@ pub struct NativeWindow {
 #[pymethods]
 impl NativeWindow {
     #[new]
-    #[pyo3(signature = (width, height, title = "Manim Community"))]
-    fn new(width: u32, height: u32, title: &str) -> PyResult<Self> {
+    #[pyo3(signature = (width, height, title = "Manim Community", fullscreen = false, position = "", monitor = 0, adapter_name = ""))]
+    fn new(
+        width: u32,
+        height: u32,
+        title: &str,
+        fullscreen: bool,
+        position: &str,
+        monitor: usize,
+        adapter_name: &str,
+    ) -> PyResult<Self> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err("preview window size must be positive"));
         }
         let closing = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(None));
-        let adapter_name = Arc::new(Mutex::new(String::new()));
+        let adapter_name_shared = Arc::new(Mutex::new(String::new()));
+        let error = Arc::new(Mutex::new(None));
         let (tx, rx) = std::sync::mpsc::channel::<Result<EventLoopProxy<UserEvent>, String>>();
 
         let thread_closing = closing.clone();
         let thread_pending = pending.clone();
-        let thread_adapter_name = adapter_name.clone();
+        let thread_adapter_name = adapter_name_shared.clone();
+        let thread_error = error.clone();
         let thread_title = title.to_owned();
+        let thread_position = position.to_owned();
+        let thread_requested_adapter = adapter_name.to_owned();
         let handle = thread::Builder::new()
             .name("manim-vk-preview".into())
             .spawn(move || {
@@ -195,10 +289,15 @@ impl NativeWindow {
                     width,
                     height,
                     title: thread_title,
+                    fullscreen,
+                    position: thread_position,
+                    monitor,
+                    requested_adapter: thread_requested_adapter,
                     proxy,
                     closing: thread_closing,
                     pending: thread_pending,
                     adapter_name: thread_adapter_name,
+                    error: thread_error,
                     window: None,
                     pixels: None,
                 };
@@ -224,7 +323,8 @@ impl NativeWindow {
             proxy,
             closing,
             pending,
-            adapter_name,
+            adapter_name: adapter_name_shared,
+            error,
             width,
             height,
             thread: Some(handle),
@@ -256,6 +356,10 @@ impl NativeWindow {
             .lock()
             .map(|name| name.clone())
             .unwrap_or_default()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|slot| slot.clone())
     }
 
     fn is_closing(&self) -> bool {

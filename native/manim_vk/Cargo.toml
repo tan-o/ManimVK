@@ -14,7 +14,7 @@ ash = "0.38"
 winit = "0.30"
 raw-window-handle = "0.6"
 pixels = "0.15"
-skia-safe = { version = "0.157", default-features = false, features = ["binary-cache", "embed-icudtl", "ganesh", "gl", "jpeg", "pdf", "textlayout", "vulkan"] }
+skia-safe = { version = "0.157", default-features = false, features = ["binary-cache", "embed-icudtl", "ganesh", "jpeg", "textlayout", "vulkan"] }
 
 [patch.crates-io]
 ash = { path = "third_party/ash-0.37.3" }

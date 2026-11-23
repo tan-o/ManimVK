@@ -204,11 +204,9 @@ class Transform(Animation):
         self.target_mobject = self.create_target()
         self.target_copy = self.target_mobject.copy()
         # Note, this potentially changes the structure
-        # of both mobject and target_mobject
-        if config.renderer == RendererType.OPENGL:
-            self.mobject.align_data_and_family(self.target_copy)
-        else:
-            self.mobject.align_data(self.target_copy)
+        # of both mobject and target_mobject.  The Vulkan/Skia backend uses
+        # the classic hierarchy for every renderer value.
+        self.mobject.align_data(self.target_copy)
         super().begin()
 
     def create_target(self) -> Mobject | OpenGLMobject:

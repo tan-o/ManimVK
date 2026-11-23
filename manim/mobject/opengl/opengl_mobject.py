@@ -24,7 +24,6 @@ from typing import (
     overload,
 )
 
-import moderngl
 import numpy as np
 import numpy.typing as npt
 from typing_extensions import (
@@ -34,7 +33,6 @@ from typing_extensions import (
 from manim import config, logger
 from manim.constants import *
 from manim.data_structures import MethodWithArgs
-from manim.renderer.opengl.shader_wrapper import get_colormap_code
 from manim.typing import (
     Point3D,
     Point3D_Array,
@@ -161,7 +159,7 @@ class OpenGLMobject:
         # Positive shadow up to 1 makes a side opposite the light darker
         shadow: float = 0.0,
         # For shaders
-        render_primitive: int = moderngl.TRIANGLES,
+        render_primitive: int = 4,  # moderngl.TRIANGLES; kept numeric to avoid an import
         texture_paths: dict[str, str] | None = None,
         depth_test: bool = False,
         # If true, the mobject will not get rotated according to camera position
@@ -3026,6 +3024,8 @@ class OpenGLMobject:
         # TODO: get_colormap_list does not exist
         #   See https://github.com/ManimCommunity/manim/issues/4176
         rgb_list = get_colormap_list(colormap)  # type: ignore[name-defined]
+        from manim.renderer.opengl.shader_wrapper import get_colormap_code
+
         self.set_color_by_code(
             f"color.rgb = float_to_color({glsl_snippet}, {float(min_value)}, {float(max_value)}, {get_colormap_code(rgb_list)});",
         )

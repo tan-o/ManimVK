@@ -8,12 +8,8 @@ __all__ = [
     "get_vectorized_mobject_class",
 ]
 
-from .._config import config
 from ..constants import RendererType
 from .mobject import Mobject
-from .opengl.opengl_mobject import OpenGLMobject
-from .opengl.opengl_point_cloud_mobject import OpenGLPMobject
-from .opengl.opengl_vectorized_mobject import OpenGLVMobject
 from .types.point_cloud_mobject import PMobject
 from .types.vectorized_mobject import VMobject
 
@@ -38,13 +34,7 @@ def get_mobject_class() -> type:
         >>> get_mobject_class().__name__ in ['Mobject', 'OpenGLMobject']
         True
     """
-    if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
-        return Mobject
-    if config.renderer == RendererType.OPENGL:
-        return OpenGLMobject
-    raise NotImplementedError(
-        "Base mobjects are not implemented for the active renderer."
-    )
+    return Mobject
 
 
 def get_vectorized_mobject_class() -> type:
@@ -68,13 +58,7 @@ def get_vectorized_mobject_class() -> type:
         >>> get_vectorized_mobject_class().__name__ in ['VMobject', 'OpenGLVMobject']
         True
     """
-    if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
-        return VMobject
-    if config.renderer == RendererType.OPENGL:
-        return OpenGLVMobject
-    raise NotImplementedError(
-        "Vectorized mobjects are not implemented for the active renderer."
-    )
+    return VMobject
 
 
 def get_point_mobject_class() -> type:
@@ -98,12 +82,6 @@ def get_point_mobject_class() -> type:
         >>> get_point_mobject_class().__name__ in ['PMobject', 'OpenGLPMobject']
         True
     """
-    if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
-        return PMobject
-    if config.renderer == RendererType.OPENGL:
-        return OpenGLPMobject
-    raise NotImplementedError(
-        "Point cloud mobjects are not implemented for the active renderer."
-    )
+    return PMobject
 
 

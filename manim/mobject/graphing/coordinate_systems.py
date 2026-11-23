@@ -28,7 +28,6 @@ from manim.mobject.graphing.number_line import NumberLine
 from manim.mobject.graphing.scale import LinearBase
 from manim.mobject.mobject import Mobject
 from manim.mobject.opengl.opengl_compatibility import ConvertToOpenGL
-from manim.mobject.opengl.opengl_surface import OpenGLSurface
 from manim.mobject.text.tex_mobject import MathTex
 from manim.mobject.three_d.three_dimensions import Surface
 from manim.mobject.types.vectorized_mobject import (
@@ -944,7 +943,7 @@ class CoordinateSystem:
         ) = None,
         colorscale_axis: int = 2,
         **kwargs: Any,
-    ) -> Surface | OpenGLSurface:
+    ) -> Surface | Surface:
         """Generates a surface based on a function.
 
         Parameters
@@ -1008,7 +1007,7 @@ class CoordinateSystem:
                     axis=colorscale_axis,
                 )
         elif config.renderer == RendererType.OPENGL:
-            surface = OpenGLSurface(
+            surface = Surface(
                 lambda u, v: self.c2p(u, v, function(u, v)),
                 u_range=u_range,
                 v_range=v_range,

@@ -86,8 +86,7 @@ if TYPE_CHECKING:
     from manim.scene.scene import Scene
 
 from manim.constants import RIGHT, TAU
-from manim.mobject.opengl.opengl_surface import OpenGLSurface
-from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVMobject
+from manim.mobject.three_d.three_dimensions import Surface
 from manim.utils.color import ManimColor
 
 from .. import config
@@ -115,7 +114,7 @@ class ShowPartial(Animation):
 
     def __init__(
         self,
-        mobject: VMobject | OpenGLVMobject | OpenGLSurface | None,
+        mobject: VMobject | VMobject | Surface | None,
         **kwargs,
     ):
         pointwise = getattr(mobject, "pointwise_become_partial", None)
@@ -166,7 +165,7 @@ class Create(ShowPartial):
 
     def __init__(
         self,
-        mobject: VMobject | OpenGLVMobject | OpenGLSurface,
+        mobject: VMobject | VMobject | Surface,
         lag_ratio: float = 1.0,
         introducer: bool = True,
         **kwargs,
@@ -196,7 +195,7 @@ class Uncreate(Create):
 
     def __init__(
         self,
-        mobject: VMobject | OpenGLVMobject,
+        mobject: VMobject | VMobject,
         reverse_rate_function: bool = True,
         remover: bool = True,
         **kwargs,
@@ -224,7 +223,7 @@ class DrawBorderThenFill(Animation):
 
     def __init__(
         self,
-        vmobject: VMobject | OpenGLVMobject,
+        vmobject: VMobject | VMobject,
         run_time: float = 2,
         rate_func: Callable[[float], float] = double_smooth,
         stroke_width: float = 2,
@@ -244,8 +243,8 @@ class DrawBorderThenFill(Animation):
         self.stroke_color = stroke_color
         self.outline = self.get_outline()
 
-    def _typecheck_input(self, vmobject: VMobject | OpenGLVMobject) -> None:
-        if not isinstance(vmobject, (VMobject, OpenGLVMobject)):
+    def _typecheck_input(self, vmobject: VMobject | VMobject) -> None:
+        if not isinstance(vmobject, (VMobject, VMobject)):
             raise TypeError(
                 f"{self.__class__.__name__} only works for vectorized Mobjects"
             )
@@ -261,7 +260,7 @@ class DrawBorderThenFill(Animation):
             sm.set_stroke(color=self.get_stroke_color(sm), width=self.stroke_width)
         return outline
 
-    def get_stroke_color(self, vmobject: VMobject | OpenGLVMobject) -> ManimColor:
+    def get_stroke_color(self, vmobject: VMobject | VMobject) -> ManimColor:
         if self.stroke_color:
             return self.stroke_color
         elif vmobject.get_stroke_width() > 0:
@@ -317,7 +316,7 @@ class Write(DrawBorderThenFill):
 
     def __init__(
         self,
-        vmobject: VMobject | OpenGLVMobject,
+        vmobject: VMobject | VMobject,
         rate_func: Callable[[float], float] = linear,
         reverse: bool = False,
         **kwargs,
@@ -343,7 +342,7 @@ class Write(DrawBorderThenFill):
 
     def _set_default_config_from_length(
         self,
-        vmobject: VMobject | OpenGLVMobject,
+        vmobject: VMobject | VMobject,
         run_time: float | None,
         lag_ratio: float | None,
     ) -> tuple[float, float]:

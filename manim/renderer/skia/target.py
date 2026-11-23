@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -21,9 +22,9 @@ class SkiaRenderTarget(_CairoRenderTarget):
     """A Cairo-compatible target whose vector drawing is done by Skia/Ganesh.
 
     The public surface mirrors :class:`_CairoRenderTarget` so the existing
-    classic-family drawing code can stay unchanged. Point-cloud and image
-    mobjects still composite on the CPU; before the next vector batch their
-    pixels are uploaded back into the GPU surface.
+    classic-family drawing code can stay unchanged.  Images, point clouds and
+    background-masked vector objects are drawn directly by Skia's GPU pipeline;
+    only the composed multi-camera sub-targets still cross the CPU boundary.
     """
 
     def __init__(
@@ -43,8 +44,14 @@ class SkiaRenderTarget(_CairoRenderTarget):
         self._cpu_dirty = False
         self._last_readback: RGBAPixelArray | None = None
         self._native.clear_rgba(0.0, 0.0, 0.0, 0.0)
+        self._owner_thread = threading.get_ident()
 
     def _ensure_open(self) -> None:
+        if self._owner_thread != threading.get_ident():
+            raise RuntimeError(
+                "SkiaRenderTarget is bound to the thread that created it; "
+                "move rendering back to that thread instead of using the target cross-thread."
+            )
         super()._ensure_open()
         if self._native is None:
             raise RuntimeError("The Skia render target is closed.")
@@ -150,6 +157,43 @@ class SkiaRenderTarget(_CairoRenderTarget):
         """Evaluate the full-screen HSB shader on the Skia Vulkan backend."""
         self._ensure_open()
         self._native.draw_hsb_quad(float(time))
+        self._gpu_dirty = True
+
+    def draw_image_quad(self, pixels, width: int, height: int, quad, alpha: float) -> None:
+        """Draw an RGBA image into a device-space quad on the GPU."""
+        self._ensure_open()
+        self._native.draw_image_quad(pixels, int(width), int(height), quad, float(alpha))
+        self._gpu_dirty = True
+
+    def draw_target_quad(self, source: SkiaRenderTarget, quad, alpha: float) -> None:
+        """Composite another target's GPU surface without a CPU readback."""
+        self._ensure_open()
+        source._ensure_open()
+        self._native.draw_target_quad(source._native, quad, float(alpha))
+        self._gpu_dirty = True
+
+    def fill_path_with_image(self, pixels) -> None:
+        """Fill the current path with a full-frame background image."""
+        self._ensure_open()
+        self._native.fill_path_with_image(pixels)
+        self._gpu_dirty = True
+
+    def draw_point_pixels(self, points, half_size: float) -> None:
+        """Draw point-cloud samples in device pixels without CPU compositing."""
+        self._ensure_open()
+        self._native.draw_point_pixels(points, float(half_size))
+        self._gpu_dirty = True
+
+    def draw_sksl_quad(self, source: str, uniforms: dict[str, object], quad) -> None:
+        """Compile and draw a user SkSL effect over a device-space quad."""
+        self._ensure_open()
+        normalized = []
+        for name, value in uniforms.items():
+            if isinstance(value, (int, float)):
+                normalized.append((str(name), [float(value)]))
+            else:
+                normalized.append((str(name), [float(v) for v in value]))
+        self._native.draw_sksl_quad(source, normalized, quad)
         self._gpu_dirty = True
 
     def draw_design3_quad(self, time: float) -> None:

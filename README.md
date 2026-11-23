@@ -78,6 +78,23 @@ Manim also ships with a `%%manim` IPython magic which allows to use it convenien
 [corresponding documentation](https://docs.manim.community/en/stable/reference/manim.utils.ipython_magic.ManimMagic.html) for some guidance and
 [try it out online](https://mybinder.org/v2/gh/ManimCommunity/jupyter_examples/HEAD?filepath=basic_example_scenes.ipynb).
 
+## Vulkan backend
+
+This fork renders through Skia's Ganesh backend on Vulkan by default; Cairo and
+moderngl are no longer required for normal rendering or import.
+
+- `--renderer vulkan` is the default. The historical `--renderer opengl`
+  spelling is routed to the same Skia/Vulkan backend.
+- `--renderer cairo` selects Cairo as an explicit reference backend; install the
+  optional dependencies with `pip install manim[legacy]`.
+- Select an adapter with a case-insensitive name substring:
+  `set MANIM_VK_DEVICE=RTX 3050` (Windows) or
+  `export MANIM_VK_DEVICE=RTX 3050` (Linux/macOS).
+- Custom effects use `SkSLMobject`, not legacy GLSL `Shader` objects: see the
+  [Vulkan backend guide](docs/source/guides/vulkan_backend.rst).
+- The preview window is read-only: `interactive_embed()` is intentionally
+  unsupported because keyboard and mouse events are not forwarded.
+
 ## Command line arguments
 
 The general usage of Manim is as follows:

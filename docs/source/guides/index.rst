@@ -11,5 +11,6 @@ Thematic Guides
    evaluation
    timeline
    deep_dive
+   vulkan_backend
    using_text
    add_voiceovers

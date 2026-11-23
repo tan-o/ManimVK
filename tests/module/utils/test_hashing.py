@@ -529,10 +529,10 @@ def test_sibling_closures_are_not_collapsed_to_placeholder():
 
 
 def test_switching_renderers_recollects_derived_attributes():
-    """``ConvertToOpenGL`` rebases classes, changing what their keys must ignore.
+    """The Vulkan/Skia build keeps one classic Mobject hierarchy.
 
-    ``Indirect`` is not itself rebased, since its base is not one of the swapped
-    classes, but rebasing that base still changes its MRO.
+    ``ConvertToOpenGL`` is a compatibility no-op now, so switching renderer
+    values must not rebase classes or change their derived-attribute set.
     """
     with tempconfig({"renderer": "cairo"}):
 
@@ -542,6 +542,7 @@ def test_switching_renderers_recollects_derived_attributes():
         assert "triangulation" not in hashing._derived_attribute_names(Indirect)
 
         with tempconfig({"renderer": "opengl"}):
-            assert "triangulation" in hashing._derived_attribute_names(Indirect)
+            assert "triangulation" not in hashing._derived_attribute_names(Indirect)
 
         assert "triangulation" not in hashing._derived_attribute_names(Indirect)
+        assert Indirect.__bases__ == (Square,)

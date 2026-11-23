@@ -14,7 +14,6 @@ from manim.animation.animation import Wait
 from manim.constants import RendererType
 from manim.renderer._execution import _ExecutionState
 from manim.renderer.protocol import RendererCapabilities, RendererState
-from manim.scene.scene import SceneInteractRerun
 from manim.utils.exceptions import EndSceneEarlyException, RerunSceneException
 from tests.helpers.audio import write_wav
 
@@ -334,7 +333,7 @@ def test_scene_play_uses_animation_duration_for_default_subcaption_after_skip(
     ]
 
 
-def test_scene_play_queues_interactive_calls_without_attaching_manager(
+def test_scene_play_routes_through_manager_in_interactive_mode(
     dry_run, monkeypatch
 ):
     scene = Scene()
@@ -344,7 +343,7 @@ def test_scene_play_queues_interactive_calls_without_attaching_manager(
     worker_thread = threading.Thread(name="Worker")
     monkeypatch.setattr(threading, "current_thread", lambda: worker_thread)
 
-    with tempconfig({"renderer": RendererType.OPENGL}):
+    with tempconfig({"renderer": RendererType.VULKAN}):
         scene.play(
             Wait(),
             run_time=2,
@@ -353,17 +352,11 @@ def test_scene_play_queues_interactive_calls_without_attaching_manager(
             subcaption_offset=0.5,
         )
 
-    assert scene.manager is None
+    # The Vulkan/Skia preview is read-only, so interactive play still runs
+    # through the manager instead of being deferred to the event loop.
+    assert scene.manager is not None
+    assert scene.queue.empty()
     renderer_play.assert_not_called()
-    queued_call = scene.queue.get_nowait()
-    assert isinstance(queued_call, SceneInteractRerun)
-    assert queued_call.sender == "play"
-    assert queued_call.kwargs == {
-        "run_time": 2,
-        "subcaption": "Hello",
-        "subcaption_duration": 1.25,
-        "subcaption_offset": 0.5,
-    }
 
 
 def test_scene_next_section_records_metadata(dry_run):

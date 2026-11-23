@@ -6,15 +6,18 @@
 
 mod window;
 
+use std::cell::RefCell;
 use std::ffi::CString;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use ash::vk;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use skia_safe::{
-    AlphaType, BlendMode, Color, Color4f, ColorType, Font, FontMgr, FontStyle, ImageInfo as SkImageInfo, Matrix,
-    Paint, PathBuilder, Point, Rect, RuntimeEffect, Shader, TileMode, M44, gpu,
+    AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, Data, Font, FontMgr, FontStyle,
+    Image, ImageInfo as SkImageInfo, Matrix, Paint, Path, PathBuilder, Point, Rect,
+    RuntimeEffect, SamplingOptions, Shader, TileMode, M44, gpu,
 };
 use skia_safe::runtime_effect::RuntimeShaderBuilder;
 use skia_safe::vertices::{VertexMode, Vertices};
@@ -32,6 +35,14 @@ struct DeviceInner {
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     device_name: String,
+}
+
+/// One Skia Ganesh context shared by every target created from the same
+/// ``Device``.  ``context`` only holds a reference-counted pointer, so each
+/// target can clone it without creating a second Vulkan context.
+struct GpuShared {
+    backend: Box<gpu::vk::BackendContext<'static>>,
+    context: gpu::DirectContext,
 }
 
 impl Drop for DeviceInner {
@@ -70,9 +81,10 @@ fn find_memory_type(
     ))
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 struct Device {
     inner: Arc<DeviceInner>,
+    gpu: RefCell<Option<Rc<GpuShared>>>,
 }
 
 #[pymethods]
@@ -85,7 +97,8 @@ impl Device {
 
         let app_name = CString::new(application_name)
             .map_err(|_| PyValueError::new_err("application name contains a NUL byte"))?;
-        let engine_name = CString::new("manim_vk").unwrap();
+        let engine_name = CString::new("manim_vk")
+            .map_err(|_| PyValueError::new_err("engine name contains a NUL byte"))?;
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app_name)
             .engine_name(&engine_name)
@@ -93,7 +106,10 @@ impl Device {
 
         let mut layer_names: Vec<CString> = Vec::new();
         if validation {
-            layer_names.push(CString::new("VK_LAYER_KHRONOS_validation").unwrap());
+            layer_names.push(
+                CString::new("VK_LAYER_KHRONOS_validation")
+                    .map_err(|_| PyValueError::new_err("validation layer name contains a NUL byte"))?,
+            );
         }
         let layer_refs: Vec<*const std::ffi::c_char> = layer_names.iter().map(|name| name.as_ptr()).collect();
         let instance_info = vk::InstanceCreateInfo::default()
@@ -202,6 +218,7 @@ impl Device {
                 fence,
                 device_name,
             }),
+            gpu: RefCell::new(None),
         })
     }
 
@@ -235,7 +252,22 @@ impl Device {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err("target dimensions must be positive"));
         }
-        SkiaTarget::new(self.inner.clone(), width, height)
+        let gpu = self.gpu_shared()?;
+        SkiaTarget::new(self.inner.clone(), gpu, width, height)
+    }
+}
+
+impl Device {
+    /// Build the shared Skia Ganesh context on first use.  The ``get_proc``
+    /// closure is leaked once per device (not once per target) and the
+    /// backend keeps that pointer alive for the process lifetime.
+    fn gpu_shared(&self) -> PyResult<Rc<GpuShared>> {
+        if let Some(shared) = self.gpu.borrow().as_ref() {
+            return Ok(shared.clone());
+        }
+        let shared = make_gpu_shared(self.inner.clone())?;
+        *self.gpu.borrow_mut() = Some(shared.clone());
+        Ok(shared)
     }
 }
 
@@ -704,6 +736,30 @@ impl Target {
 }
 
 
+fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
+    use ash::vk::Handle;
+    let inner_for_proc = inner.clone();
+    // Leak exactly one trampoline per Device.  Skia's BackendContext stores a
+    // raw pointer to it, so it must outlive every target created from this
+    // device; one device per process is the normal Manim lifecycle.
+    let get_proc = Box::leak(Box::new(move |of| skia_get_proc(&inner_for_proc, of)));
+    let backend = Box::new(unsafe {
+        gpu::vk::BackendContext::new_builder(
+            inner.instance.handle().as_raw() as _,
+            inner.physical_device.as_raw() as _,
+            inner.device.handle().as_raw() as _,
+            (inner.queue.as_raw() as _, 0usize),
+            &*get_proc,
+            Some((1, 3, 0).into()),
+        )
+        .build()
+    });
+    let context = gpu::direct_contexts::make_vulkan(&backend, None)
+        .ok_or_else(|| PyRuntimeError::new_err("Skia make_vulkan returned None"))?;
+    Ok(Rc::new(GpuShared { backend, context }))
+}
+
+
 fn skia_get_proc(
     inner: &DeviceInner,
     of: gpu::vk::GetProcOf,
@@ -737,38 +793,32 @@ fn skia_get_proc(
 #[pyclass(unsendable)]
 struct SkiaTarget {
     inner: Arc<DeviceInner>,
+    _gpu: Rc<GpuShared>,
     width: u32,
     height: u32,
     surface: skia_safe::Surface,
     context: gpu::DirectContext,
-    backend: Box<gpu::vk::BackendContext<'static>>,
     path: PathBuilder,
     paint: Paint,
     matrix: M44,
+    matrix_sx: f32,
+    matrix_sy: f32,
+    matrix_tx: f32,
+    matrix_ty: f32,
     hsb_effect: Option<RuntimeEffect>,
     design3_effect: Option<RuntimeEffect>,
 }
 
 impl SkiaTarget {
-    fn new(inner: Arc<DeviceInner>, width: u32, height: u32) -> PyResult<Self> {
-        use ash::vk::Handle;
-        let inner_for_proc = inner.clone();
-        let get_proc = Box::leak(Box::new(move |of| {
-            skia_get_proc(&inner_for_proc, of)
-        }));
-        let backend = Box::new(unsafe {
-            gpu::vk::BackendContext::new_builder(
-                inner.instance.handle().as_raw() as _,
-                inner.physical_device.as_raw() as _,
-                inner.device.handle().as_raw() as _,
-                (inner.queue.as_raw() as _, 0usize),
-                &*get_proc,
-                Some((1, 3, 0).into()),
-            )
-            .build()
-        });
-        let mut context = gpu::direct_contexts::make_vulkan(&backend, None)
-            .ok_or_else(|| PyRuntimeError::new_err("Skia make_vulkan returned None"))?;
+    fn new(
+        inner: Arc<DeviceInner>,
+        gpu: Rc<GpuShared>,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Self> {
+        // Cloning a DirectContext only bumps Skia's reference count; all
+        // targets share the one Ganesh context created for this Device.
+        let mut context = gpu.context.clone();
         let info = SkImageInfo::new(
             (width as i32, height as i32),
             ColorType::RGBA8888,
@@ -788,11 +838,11 @@ impl SkiaTarget {
         .ok_or_else(|| PyRuntimeError::new_err("Skia render_target returned None"))?;
         Ok(Self {
             inner,
+            _gpu: gpu,
             width,
             height,
             surface,
             context,
-            backend,
             path: PathBuilder::new(),
             paint: {
                 let mut paint = Paint::default();
@@ -800,6 +850,10 @@ impl SkiaTarget {
                 paint
             },
             matrix: M44::new_identity(),
+            matrix_sx: 1.0,
+            matrix_sy: -1.0,
+            matrix_tx: 0.0,
+            matrix_ty: 0.0,
             hsb_effect: None,
             design3_effect: None,
         })
@@ -839,6 +893,10 @@ impl SkiaTarget {
             0.0, 0.0, 0.0, 1.0,
         ]);
         self.matrix = matrix;
+        self.matrix_sx = sx;
+        self.matrix_sy = sy;
+        self.matrix_tx = tx;
+        self.matrix_ty = ty;
         self.surface.canvas().set_matrix(&self.matrix);
     }
 
@@ -979,7 +1037,298 @@ impl SkiaTarget {
         self.paint.set_alpha(255);
         self.surface
             .canvas()
-            .draw_vertices(&vertices, BlendMode::SrcOver, &self.paint);
+            .draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
+    }
+
+    /// Draw a raster RGBA image into an arbitrary device-space quad.  The
+    /// image is sampled by Skia's GPU pipeline, so no host-side compositing is
+    /// required for ``ImageMobject``.
+    fn draw_image_quad(
+        &mut self,
+        pixels: Vec<u8>,
+        image_width: u32,
+        image_height: u32,
+        quad: Vec<(f32, f32)>,
+        alpha: f32,
+    ) -> PyResult<()> {
+        if quad.len() != 4 {
+            return Err(PyValueError::new_err("image quad needs four corners"));
+        }
+        if image_width == 0
+            || image_height == 0
+            || pixels.len() != (image_width * image_height * 4) as usize
+        {
+            return Err(PyValueError::new_err("image pixel buffer has the wrong size"));
+        }
+        let info = SkImageInfo::new(
+            (image_width as i32, image_height as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let image = Image::from_raster_data(
+            &info,
+            Data::new_copy(pixels.as_slice()),
+            (image_width * 4) as usize,
+        )
+        .ok_or_else(|| PyRuntimeError::new_err("Skia Image::from_raster_data failed"))?;
+        let shader = image
+            .to_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                SamplingOptions::default(),
+                None,
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("Skia image shader failed"))?;
+
+        let (w, h) = (image_width as f32, image_height as f32);
+        let tex = [
+            Point::new(0.0, 0.0),
+            Point::new(w, 0.0),
+            Point::new(w, h),
+            Point::new(0.0, h),
+        ];
+        let corners = [
+            Point::new(quad[0].0, quad[0].1),
+            Point::new(quad[1].0, quad[1].1),
+            Point::new(quad[2].0, quad[2].1),
+            Point::new(quad[3].0, quad[3].1),
+        ];
+        let positions = [corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]];
+        let tex_coords = [tex[0], tex[1], tex[2], tex[0], tex[2], tex[3]];
+        let colors = [Color::WHITE; 6];
+        let vertices = Vertices::new_copy(
+            VertexMode::Triangles,
+            &positions,
+            &tex_coords,
+            &colors,
+            None,
+        );
+        let canvas = self.surface.canvas();
+        canvas.reset_matrix();
+        self.paint.set_shader(shader);
+        self.paint.set_style(Style::Fill);
+        self.paint.set_color(Color::WHITE);
+        self.paint.set_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8);
+        canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
+        self.paint.set_shader(None);
+        self.paint.set_alpha(255);
+        canvas.set_matrix(&self.matrix);
+        Ok(())
+    }
+
+    /// Draw another Skia target's surface into a device-space quad without
+    /// reading its pixels back to the CPU.  Used by MultiCamera composition.
+    fn draw_target_quad(
+        &mut self,
+        source: &mut SkiaTarget,
+        quad: Vec<(f32, f32)>,
+        alpha: f32,
+    ) -> PyResult<()> {
+        if quad.len() != 4 {
+            return Err(PyValueError::new_err("target quad needs four corners"));
+        }
+        source
+            .context
+            .flush_and_submit()
+            .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
+        let image = source.surface.image_snapshot();
+        let shader = image
+            .to_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                SamplingOptions::default(),
+                None,
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("Skia target image shader failed"))?;
+        let (w, h) = (source.width as f32, source.height as f32);
+        let tex = [
+            Point::new(0.0, 0.0),
+            Point::new(w, 0.0),
+            Point::new(w, h),
+            Point::new(0.0, h),
+        ];
+        let corners = [
+            Point::new(quad[0].0, quad[0].1),
+            Point::new(quad[1].0, quad[1].1),
+            Point::new(quad[2].0, quad[2].1),
+            Point::new(quad[3].0, quad[3].1),
+        ];
+        let positions = [corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]];
+        let tex_coords = [tex[0], tex[1], tex[2], tex[0], tex[2], tex[3]];
+        let colors = [Color::WHITE; 6];
+        let vertices = Vertices::new_copy(
+            VertexMode::Triangles,
+            &positions,
+            &tex_coords,
+            &colors,
+            None,
+        );
+        let canvas = self.surface.canvas();
+        canvas.reset_matrix();
+        self.paint.set_shader(shader);
+        self.paint.set_style(Style::Fill);
+        self.paint.set_color(Color::WHITE);
+        self.paint.set_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8);
+        canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
+        self.paint.set_shader(None);
+        self.paint.set_alpha(255);
+        canvas.set_matrix(&self.matrix);
+        Ok(())
+    }
+
+    /// Compile a user-supplied SkSL runtime effect and draw it over a
+    /// device-space quad.  Syntax errors are reported as Python exceptions
+    /// instead of silently falling back to a flat colour.
+    fn draw_sksl_quad(
+        &mut self,
+        source: String,
+        uniforms: Vec<(String, Vec<f32>)>,
+        quad: Vec<(f32, f32)>,
+    ) -> PyResult<()> {
+        if quad.len() != 4 {
+            return Err(PyValueError::new_err("SkSL quad needs four corners"));
+        }
+        let effect = RuntimeEffect::make_for_shader(source.as_str(), None)
+            .map_err(|error| PyRuntimeError::new_err(format!("SkSL compile failed: {error}")))?;
+        let mut builder = RuntimeShaderBuilder::new(effect);
+        let mut has_resolution = false;
+        for (name, values) in uniforms {
+            if name == "u_resolution" {
+                has_resolution = true;
+            }
+            builder
+                .set_uniform_float(name.as_str(), values.as_slice())
+                .map_err(|error| {
+                    PyValueError::new_err(format!("SkSL uniform {name}: {error:?}"))
+                })?;
+        }
+        if !has_resolution {
+            // Most full-screen effects declare u_resolution.  Ignoring the
+            // error keeps shaders that do not need it valid.
+            let _ = builder.set_uniform_float(
+                "u_resolution",
+                &[self.width as f32, self.height as f32],
+            );
+        }
+        let shader = builder
+            .make_shader(&Matrix::new_identity())
+            .ok_or_else(|| PyRuntimeError::new_err("SkSL make_shader returned None"))?;
+        let mut clip = PathBuilder::new();
+        clip.move_to(Point::new(quad[0].0, quad[0].1));
+        for corner in &quad[1..] {
+            clip.line_to(Point::new(corner.0, corner.1));
+        }
+        clip.close();
+        let clip = clip.snapshot();
+        let canvas = self.surface.canvas();
+        canvas.reset_matrix();
+        canvas.save();
+        canvas.clip_path(&clip, ClipOp::Intersect, true);
+        self.paint.set_shader(shader);
+        self.paint.set_style(Style::Fill);
+        self.paint.set_color(Color::WHITE);
+        self.paint.set_alpha(255);
+        canvas.draw_rect(
+            Rect::new(0.0, 0.0, self.width as f32, self.height as f32),
+            &self.paint,
+        );
+        canvas.restore();
+        self.paint.set_shader(None);
+        canvas.set_matrix(&self.matrix);
+        Ok(())
+    }
+
+    /// Fill the current path with a full-target background image.  The local
+    /// matrix maps the path's scene coordinates onto the image's device pixels,
+    /// keeping the mask and background on the GPU.
+    fn fill_path_with_image(&mut self, pixels: Vec<u8>) -> PyResult<()> {
+        if pixels.len() != (self.width * self.height * 4) as usize {
+            return Err(PyValueError::new_err("background pixel buffer has the wrong size"));
+        }
+        let info = SkImageInfo::new(
+            (self.width as i32, self.height as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let image = Image::from_raster_data(
+            &info,
+            Data::new_copy(pixels.as_slice()),
+            (self.width * 4) as usize,
+        )
+        .ok_or_else(|| PyRuntimeError::new_err("Skia background image failed"))?;
+        let local = Matrix::new_all(
+            self.matrix_sx,
+            0.0,
+            self.matrix_tx,
+            0.0,
+            self.matrix_sy,
+            self.matrix_ty,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let shader = image
+            .to_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                SamplingOptions::default(),
+                Some(&local),
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("Skia background shader failed"))?;
+        let path = self.path.snapshot();
+        self.paint.set_shader(shader);
+        self.paint.set_style(Style::Fill);
+        self.paint.set_color(Color::WHITE);
+        self.paint.set_alpha(255);
+        self.surface.canvas().draw_path(&path, &self.paint);
+        self.paint.set_shader(None);
+        Ok(())
+    }
+
+    /// Draw point-cloud pixels directly into the target.  ``points`` contains
+    /// (x, y, r, g, b, a) tuples in device pixel coordinates, and ``half_size``
+    /// is the half extent of the square used for a point.
+    fn draw_point_pixels(
+        &mut self,
+        points: Vec<(f32, f32, u8, u8, u8, u8)>,
+        half_size: f32,
+    ) {
+        if points.is_empty() {
+            return;
+        }
+        let half = half_size.max(0.5);
+        let mut positions = Vec::with_capacity(points.len() * 6);
+        let mut colors = Vec::with_capacity(points.len() * 6);
+        for (x, y, r, g, b, a) in points {
+            let color = Color::from_argb(a, r, g, b);
+            let corners = [
+                (x - half, y - half),
+                (x + half, y - half),
+                (x + half, y + half),
+                (x - half, y + half),
+            ];
+            for index in [0, 1, 2, 0, 2, 3] {
+                positions.push(Point::new(corners[index].0, corners[index].1));
+                colors.push(color);
+            }
+        }
+        let tex_coords = vec![Point::new(0.0, 0.0); positions.len()];
+        let vertices = Vertices::new_copy(
+            VertexMode::Triangles,
+            &positions,
+            &tex_coords,
+            &colors,
+            None,
+        );
+        let canvas = self.surface.canvas();
+        canvas.reset_matrix();
+        self.paint.set_shader(None);
+        self.paint.set_style(Style::Fill);
+        self.paint.set_color(Color::WHITE);
+        self.paint.set_alpha(255);
+        self.paint.set_anti_alias(false);
+        canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
+        self.paint.set_anti_alias(true);
+        canvas.set_matrix(&self.matrix);
     }
 
     /// Evaluate the canonical HSB/RGB polar shader used by Manim's

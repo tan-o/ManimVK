@@ -44,7 +44,7 @@ from watchdog.observers import Observer
 from manim import __version__
 from manim.data_structures import MethodWithArgs
 from manim.mobject.mobject import Mobject
-from manim.mobject.opengl.opengl_mobject import OpenGLMobject, OpenGLPoint
+from manim.mobject.types.point_cloud_mobject import Point
 
 from .. import config, logger
 from .._config.output_plan import (
@@ -59,15 +59,18 @@ from .._run.frames import frame_count
 from ..animation.animation import Animation, Wait, prepare_animation
 from ..constants import *
 from ..manager import Manager
-from ..renderer.cairo import CairoRenderer
 from ..renderer.skia.renderer import SkiaRenderer
 from ..renderer.cairo.camera import Camera
-from ..renderer.opengl.camera import OpenGLCamera
-from ..renderer.opengl.renderer import OpenGLRenderer
-from ..renderer.vulkan.renderer import VulkanRenderer
-from ..renderer.opengl.shader import Object3D
 from ..scene.scene_file_writer import _SceneFileWriterSettings
 from ..utils import opengl, space_ops
+
+if TYPE_CHECKING:
+    from ..mobject.opengl.opengl_mobject import OpenGLMobject, OpenGLPoint
+    from ..renderer.cairo.renderer import CairoRenderer
+    from ..renderer.opengl.camera import OpenGLCamera
+    from ..renderer.opengl.renderer import OpenGLRenderer
+    from ..renderer.opengl.shader import Object3D
+    from ..renderer.vulkan.renderer import VulkanRenderer
 from ..utils.deprecation import deprecated
 from ..utils.exceptions import RerunSceneException
 from ..utils.family import extract_mobject_family_members
@@ -191,7 +194,7 @@ class Scene:
 
     def __init__(
         self,
-        renderer: CairoRenderer | OpenGLRenderer | VulkanRenderer | None = None,
+        renderer: Any = None,
         camera_class: type[Camera] = Camera,
         always_update_mobjects: bool = False,
         random_seed: int | None = None,
@@ -211,7 +214,7 @@ class Scene:
         self.last_t = 0.0
         self.queue: Queue[SceneInteractAction] = Queue()
         self.skip_animation_preview = False
-        self.meshes: list[Object3D] = []
+        self.meshes: list[Any] = []
         self.camera_target = ORIGIN
         self.widgets: list[dict[str, Any]] = []
         self.dearpygui_imported = dearpygui_imported
@@ -221,29 +224,32 @@ class Scene:
         self.interactive_mode = False
         self.manager: Manager[Self] | None = None
 
-        if config.renderer == RendererType.OPENGL:
-            # Items associated with interaction
-            self.mouse_point = OpenGLPoint()
-            self.mouse_drag_point = OpenGLPoint()
-            if renderer is None:
-                renderer = OpenGLRenderer()
+        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
+            # Interaction points remain classic mobjects; the Vulkan backend
+            # does not consume OpenGL buffers.
+            self.mouse_point = Point()
+            self.mouse_drag_point = Point()
 
         if renderer is None:
             if config.renderer == RendererType.CAIRO:
                 # Explicit Cairo requests keep the baseline rasterizer for
                 # compatibility tests and reference renders.
+                from ..renderer.cairo import CairoRenderer
+
                 renderer = CairoRenderer(
                     camera_class=self.camera_class,
                     skip_animations=self.skip_animations,
                 )
             else:
-                # Classic mobjects keep their full API; only the raster backend is
-                # switched from Cairo to Skia/Ganesh on Vulkan.
+                # Classic mobjects keep their full API; only the raster backend
+                # is switched from Cairo to Skia/Ganesh on Vulkan.  A Python
+                # level ``config.renderer = "opengl"`` is routed here too so
+                # the retired moderngl pipeline cannot be reached.
                 renderer = SkiaRenderer(
                     camera_class=self.camera_class,
                     skip_animations=self.skip_animations,
                 )
-        self._renderer: CairoRenderer | OpenGLRenderer | VulkanRenderer = renderer
+        self._renderer: Any = renderer
         self.session_spec = resolve_render_session(
             config,
             self.renderer.capabilities,
@@ -577,7 +583,11 @@ class Scene:
                 family_members.extend(mob.get_family())
             return family_members
         else:
-            assert config.renderer in (RendererType.CAIRO, RendererType.VULKAN)
+            assert config.renderer in (
+                RendererType.CAIRO,
+                RendererType.OPENGL,
+                RendererType.VULKAN,
+            )
             return extract_mobject_family_members(
                 self.mobjects,
                 use_z_index=self.renderer.camera.use_z_index,
@@ -599,34 +609,21 @@ class Scene:
             The same scene after adding the Mobjects in.
 
         """
-        if config.renderer == RendererType.OPENGL:
+        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
             new_mobjects = []
-            new_meshes: list[Object3D] = []
+            new_meshes: list[Any] = []
             for mobject_or_mesh in mobjects:
-                if isinstance(mobject_or_mesh, Object3D):
-                    new_meshes.append(mobject_or_mesh)
-                else:
+                if isinstance(mobject_or_mesh, Mobject):
                     new_mobjects.append(mobject_or_mesh)
+                else:
+                    new_meshes.append(mobject_or_mesh)
             self.remove(*new_mobjects)  # type: ignore[arg-type]
             self.mobjects += new_mobjects  # type: ignore[arg-type]
             self.remove(*new_meshes)  # type: ignore[arg-type]
             self.meshes += new_meshes
         else:
-            assert config.renderer in (RendererType.CAIRO, RendererType.VULKAN)
-            if config.renderer == RendererType.VULKAN:
-                new_mobjects: list[Mobject] = []
-                new_meshes: list[Object3D] = []
-                for mobject_or_mesh in mobjects:
-                    if isinstance(mobject_or_mesh, Object3D):
-                        new_meshes.append(mobject_or_mesh)
-                    else:
-                        new_mobjects.append(mobject_or_mesh)
-                self.remove(*new_mobjects)
-                self.meshes += [
-                    mesh for mesh in new_meshes if mesh not in self.meshes
-                ]
-            else:
-                new_mobjects = list(mobjects)  # type: ignore[assignment]
+            assert config.renderer == RendererType.CAIRO
+            new_mobjects = list(mobjects)  # type: ignore[assignment]
             new_and_foreground_mobjects: list[Mobject] = [
                 *new_mobjects,
                 *self.foreground_mobjects,
@@ -664,41 +661,29 @@ class Scene:
         *mobjects
             The mobjects to remove.
         """
-        if config.renderer == RendererType.OPENGL:
+        if config.renderer in (RendererType.OPENGL, RendererType.VULKAN):
             mobjects_to_remove = []
-            meshes_to_remove: set[Object3D] = set()
+            meshes_to_remove: set[Any] = set()
             mobject_or_mesh: Mobject
             for mobject_or_mesh in mobjects:
-                if isinstance(mobject_or_mesh, Object3D):
-                    meshes_to_remove.add(mobject_or_mesh)
-                else:
+                if isinstance(mobject_or_mesh, Mobject):
                     mobjects_to_remove.append(mobject_or_mesh)
+                else:
+                    meshes_to_remove.add(mobject_or_mesh)
             self.mobjects = restructure_list_to_exclude_certain_family_members(
                 self.mobjects,
                 mobjects_to_remove,
             )
 
-            def lambda_function(mesh: Object3D) -> bool:
-                return mesh not in set(meshes_to_remove)
+            def lambda_function(mesh: Any) -> bool:
+                return mesh not in meshes_to_remove
 
             self.meshes = list(
                 filter(lambda_function, self.meshes),
             )
             return self
         else:
-            assert config.renderer in (RendererType.CAIRO, RendererType.VULKAN)
-            if config.renderer == RendererType.VULKAN:
-                classic_mobjects: list[Mobject] = []
-                mesh_to_remove: set[Object3D] = set()
-                for mobject in mobjects:
-                    if isinstance(mobject, Object3D):
-                        mesh_to_remove.add(mobject)
-                    else:
-                        classic_mobjects.append(mobject)
-                self.meshes = [
-                    mesh for mesh in self.meshes if mesh not in mesh_to_remove
-                ]
-                mobjects = tuple(classic_mobjects)
+            assert config.renderer == RendererType.CAIRO
             for list_name in "mobjects", "foreground_mobjects":
                 self.restructure_mobjects(mobjects, list_name, False)
             return self
@@ -1281,23 +1266,6 @@ class Scene:
             animations instead.
 
         """
-        # If we are in interactive embedded mode, make sure this is running on the main thread (required for OpenGL)
-        if (
-            self.interactive_mode
-            and config.renderer == RendererType.OPENGL
-            and threading.current_thread().name != "MainThread"
-        ):
-            # TODO: are these actually being used?
-            kwargs.update(
-                {
-                    "subcaption": subcaption,
-                    "subcaption_duration": subcaption_duration,
-                    "subcaption_offset": subcaption_offset,
-                }
-            )
-            self.queue.put(SceneInteractRerun("play", **kwargs))
-            return
-
         self._get_manager().play(
             *args,
             subcaption=subcaption,
@@ -1430,7 +1398,11 @@ class Scene:
             animation._setup_scene(self)
             animation.begin()
 
-        if config.renderer in (RendererType.CAIRO, RendererType.VULKAN):
+        if config.renderer in (
+            RendererType.CAIRO,
+            RendererType.OPENGL,
+            RendererType.VULKAN,
+        ):
             # Identify mobjects whose pixels can be reused between frames.
             (
                 self.moving_mobjects,
@@ -1447,7 +1419,13 @@ class Scene:
         )
 
     def check_interactive_embed_is_valid(self) -> bool:
-        assert isinstance(self.renderer, (OpenGLRenderer, VulkanRenderer, SkiaRenderer))
+        assert isinstance(self.renderer, SkiaRenderer)
+        if isinstance(self.renderer, SkiaRenderer):
+            logger.warning(
+                "Interactive embed is not supported by the Vulkan backend yet; "
+                "use embed() for a read-only preview.",
+            )
+            return False
         if self.skip_animation_preview:
             logger.warning(
                 "Disabling interactive embed as 'skip_animation_preview' is enabled",
@@ -1470,8 +1448,13 @@ class Scene:
         """Like embed(), but allows for screen interaction."""
         if self.manager is not None:
             self.manager._mode.check("Interactive preview")
-        assert isinstance(self.camera, (Camera, OpenGLCamera))
-        assert isinstance(self.renderer, (OpenGLRenderer, VulkanRenderer, SkiaRenderer))
+        assert isinstance(self.camera, Camera)
+        assert isinstance(self.renderer, SkiaRenderer)
+        logger.warning(
+            "interactive_embed() is not supported by the Vulkan/Skia preview: "
+            "the window is read-only and does not forward mouse or keyboard events."
+        )
+        return
         if not self.check_interactive_embed_is_valid():
             return
         self.interactive_mode = True
@@ -1556,7 +1539,7 @@ class Scene:
     def interact(self, shell: Any, keyboard_thread: threading.Thread) -> None:
         if self.manager is not None:
             self.manager._mode.check("Interactive preview")
-        assert isinstance(self.renderer, (OpenGLRenderer, VulkanRenderer))
+        assert isinstance(self.renderer, SkiaRenderer)
         event_handler = RerunSceneHandler(self.queue)
         file_observer = Observer()
         file_observer.schedule(event_handler, config.input_file, recursive=True)
@@ -1637,7 +1620,7 @@ class Scene:
     def embed(self) -> None:
         if self.manager is not None:
             self.manager._mode.check("Interactive preview")
-        assert isinstance(self.renderer, (OpenGLRenderer, VulkanRenderer, SkiaRenderer))
+        assert isinstance(self.renderer, SkiaRenderer)
         if not self.session_spec.presentation.live_preview:
             logger.warning("Called embed() while no live preview window is available.")
             return
@@ -1863,9 +1846,21 @@ class Scene:
         """
         self._get_manager().add_sound(sound_file, time_offset, gain, gain_to_background)
 
+    def _require_legacy_interaction(self) -> None:
+        """Raise when legacy OpenGL camera interaction is not available."""
+        from ..renderer.opengl.camera import OpenGLCamera
+        from ..renderer.opengl.renderer import OpenGLRenderer
+
+        if not isinstance(self.camera, OpenGLCamera) or not isinstance(
+            self.renderer, OpenGLRenderer
+        ):
+            raise RuntimeError(
+                "Mouse and keyboard camera controls require the retired "
+                "OpenGL renderer; the Vulkan backend does not forward input yet.",
+            )
+
     def on_mouse_motion(self, point: Point3D, d_point: Point3D) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
-        assert isinstance(self.renderer, (OpenGLRenderer, VulkanRenderer))
+        self._require_legacy_interaction()
         self.mouse_point.move_to(point)
         if SHIFT_VALUE in self.renderer.pressed_keys:
             shift = -d_point
@@ -1876,14 +1871,14 @@ class Scene:
             self.camera.shift(shift)
 
     def on_mouse_scroll(self, point: Point3D, offset: Point3D) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
+        self._require_legacy_interaction()
         if not config.use_projection_stroke_shaders:
             factor = 1 + np.arctan(-2.1 * offset[1])
             self.camera.scale(factor, about_point=self.camera_target)
         self.mouse_scroll_orbit_controls(point, offset)
 
     def on_key_press(self, symbol: int, modifiers: int) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
+        self._require_legacy_interaction()
         try:
             char = chr(symbol)
         except OverflowError:
@@ -1909,7 +1904,7 @@ class Scene:
         buttons: int,
         modifiers: int,
     ) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
+        self._require_legacy_interaction()
         self.mouse_drag_point.move_to(point)
         if buttons == 1:
             self.camera.increment_theta(-d_point[0])
@@ -1924,7 +1919,7 @@ class Scene:
         self.mouse_drag_orbit_controls(point, d_point, buttons, modifiers)
 
     def mouse_scroll_orbit_controls(self, point: Point3D, offset: Point3D) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
+        self._require_legacy_interaction()
         camera_to_target = self.camera_target - self.camera.get_position()
         camera_to_target *= np.sign(offset[1])
         shift_vector = 0.01 * camera_to_target
@@ -1939,7 +1934,7 @@ class Scene:
         buttons: int,
         modifiers: int,
     ) -> None:
-        assert isinstance(self.camera, OpenGLCamera)
+        self._require_legacy_interaction()
         # Left click drag.
         if buttons == 1:
             # Translate to target the origin and rotate around the z axis.

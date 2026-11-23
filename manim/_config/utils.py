@@ -1385,51 +1385,19 @@ class ManimConfig(MutableMapping):
 
     @renderer.setter
     def renderer(self, value: str | RendererType) -> None:
-        """The setter of the renderer property.
+        """Set the renderer selection.
 
-        Takes care of switching inheritance bases using the
-        :class:`.ConvertToOpenGL` metaclass.
+        The classic mobject family is shared by the Vulkan, Cairo and legacy
+        compatibility paths; the retired OpenGL renderer no longer swaps class
+        bases at runtime.
         """
         if isinstance(value, str):
             value = value.lower()
         renderer = RendererType(value)
-        try:
-            from manim.mobject.opengl.opengl_compatibility import ConvertToOpenGL
-            from manim.mobject.opengl.opengl_mobject import OpenGLMobject
-            from manim.mobject.opengl.opengl_vectorized_mobject import OpenGLVMobject
-
-            from ..mobject.mobject import Mobject
-            from ..mobject.types.vectorized_mobject import VMobject
-
-            for cls in ConvertToOpenGL._converted_classes:
-                if renderer == RendererType.OPENGL:
-                    conversion_dict = {
-                        Mobject: OpenGLMobject,
-                        VMobject: OpenGLVMobject,
-                    }
-                else:
-                    conversion_dict = {
-                        OpenGLMobject: Mobject,
-                        OpenGLVMobject: VMobject,
-                    }
-
-                cls.__bases__ = tuple(
-                    conversion_dict.get(base, base) for base in cls.__bases__
-                )
-
-            from ..utils.hashing import invalidate_derived_attribute_names
-
-            # Rebasing changes which attributes the cache key must ignore, including
-            # for classes that only inherit from a rebased one.
-            invalidate_derived_attribute_names()
-        except ImportError:
-            # The renderer is set during the initial import of the
-            # library for the first time. The imports above cause an
-            # ImportError due to circular imports. However, the
-            # metaclass sets stuff up correctly in this case, so we
-            # can just do nothing.
-            pass
-
+        if renderer is RendererType.OPENGL:
+            # The retired moderngl backend is not selectable.  Keep the old
+            # CLI/config spelling working by routing it to Vulkan/Skia.
+            renderer = RendererType.VULKAN
         self._set_from_enum("renderer", renderer, RendererType)
 
     @property

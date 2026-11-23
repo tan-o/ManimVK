@@ -40,22 +40,26 @@ def test_a_renderer_goes_from_unopened_to_open_to_closed(renderer):
             renderer.open()
 
 
-def test_a_failed_opengl_close_can_be_retried():
+def test_a_failed_vulkan_close_can_be_retried():
     with tempconfig({**SETTINGS, "renderer": "opengl"}):
         renderer = Scene().renderer
         renderer.open()
-        # Releasing fails and leaves the context alive: close() keeps a way to
-        # release it and can be called again.
-        resources = renderer._resources
-        renderer._resources = Mock(close=Mock(side_effect=OSError("release failed")))
+        renderer.render_mobjects([Square()])
+        assert renderer._target is not None
+        # Releasing fails and leaves the Skia target alive: close() keeps it
+        # around and can be called again.
+        target = renderer._target
+        target_close = target.close
+        target.close = Mock(side_effect=[OSError("release failed"), None])
         with pytest.raises(OSError, match="release failed"):
             renderer.close()
-        resources.pop_all()
         assert renderer.state is RendererState.CLOSE_FAILED
         with pytest.raises(RuntimeError, match="close failed"):
             renderer.open()
+        target.close = target_close
         renderer.close()
         assert renderer.state is RendererState.CLOSED
+        assert target._closed
 
 
 def test_a_failed_cairo_close_can_be_retried():

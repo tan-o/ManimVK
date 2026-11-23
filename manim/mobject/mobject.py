@@ -1007,16 +1007,33 @@ class Mobject:
 
     # Displaying
     def get_image(self, camera: Camera | None = None) -> Image.Image:
-        """Draw this mobject and its submobjects using Cairo and return a PIL image.
+        """Draw this mobject and its submobjects and return a PIL image.
 
-        Pass a ``camera`` to select the view, or omit it to create a default
-        :class:`.Camera`. To use a scene's current view, pass ``camera=scene.camera``.
+        The renderer follows :attr:`manim.config.renderer`: Vulkan (the
+        default) uses the Skia/Ganesh target, while an explicit Cairo request
+        keeps the reference rasterizer. Pass a ``camera`` to select the view,
+        or omit it to create a default :class:`.Camera`. To use a scene's
+        current view, pass ``camera=scene.camera``.
         """
         # Import here: the camera and renderer modules import this module.
-        from manim.renderer.cairo import CairoRenderer
         from manim.renderer.cairo.camera import Camera
+        from manim.constants import RendererType
 
-        with CairoRenderer(camera=Camera() if camera is None else camera) as renderer:
+        render_camera = Camera() if camera is None else camera
+        if config.renderer == RendererType.CAIRO:
+            from manim.renderer.cairo import CairoRenderer
+
+            renderer = CairoRenderer(camera=render_camera)
+        else:
+            # Vulkan is the default.  The explicit OPENGL setting is routed
+            # through the same Skia/Vulkan target so a Python-level
+            # ``config.renderer = "opengl"`` cannot resurrect the retired
+            # moderngl pipeline.
+            from manim.renderer.skia.renderer import SkiaRenderer
+
+            renderer = SkiaRenderer(camera=render_camera)
+
+        with renderer:
             renderer.render_mobjects([self])
             return renderer.get_image()
 

@@ -50,10 +50,21 @@ class VulkanWindow:
             )
         self.renderer = renderer
         self.width, self.height = size
+        device = getattr(renderer, "_vk_device", None)
+        adapter_name = ""
+        if device is not None:
+            try:
+                adapter_name = device.device_name()
+            except Exception:
+                adapter_name = ""
         self._native = manim_vk.NativeWindow(
             self.width,
             self.height,
             f"Manim Community {__version__}",
+            bool(self._settings.fullscreen),
+            str(self._settings.position or ""),
+            max(0, int(self._settings.monitor)),
+            adapter_name,
         )
         self.title = f"Manim Community {__version__}"
         self._closed = False
@@ -72,11 +83,29 @@ class VulkanWindow:
     def swap_buffers(self) -> None:
         """Present the renderer's latest top-down RGBA frame."""
         if self._closed or self._native.is_closing():
+            error = self._native.error()
+            if error and not self._closed:
+                self._closed = True
+                raise RuntimeError(error)
             return
         if not self._adapter_logged:
             adapter = self._native.adapter_name()
             if adapter:
                 logger.info("Vulkan preview adapter: %s", adapter)
+                device = getattr(self.renderer, "_vk_device", None)
+                if device is not None:
+                    try:
+                        render_device = device.device_name()
+                    except Exception:
+                        render_device = ""
+                    if render_device and adapter != render_device:
+                        logger.warning(
+                            "Vulkan preview adapter (%s) differs from the offscreen "
+                            "render device (%s); dual-GPU systems may present on a "
+                            "different adapter.",
+                            adapter,
+                            render_device,
+                        )
                 self._adapter_logged = True
         frame = self.renderer.get_frame()
         self._native.present_rgba(frame.tobytes())

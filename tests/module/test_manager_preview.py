@@ -2,13 +2,21 @@
 
 from unittest.mock import Mock
 
+import manim_vk
 import pytest
 
 from manim import Scene, tempconfig
 
 
 @pytest.fixture
-def scene():
+def scene(monkeypatch):
+    # winit's event loop can only be created once per process; the unit tests
+    # exercise the manager/embed contract, so use a fake native window.
+    fake_window = Mock()
+    fake_window.is_closing.return_value = False
+    fake_window.error.return_value = None
+    fake_window.adapter_name.return_value = ""
+    monkeypatch.setattr(manim_vk, "NativeWindow", Mock(return_value=fake_window))
     with tempconfig({"renderer": "opengl", "format": "none", "live_preview": True}):
         scene = Scene()
         with scene._get_manager():

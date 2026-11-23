@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from manim.mobject.sksl import SkSLMobject
+from manim.mobject.types.image_mobject import ImageMobjectFromCamera
 from manim.renderer.cairo.rendering import (
     _CAP_STYLE_MAP,
     _LINE_JOIN_MAP,
@@ -19,6 +21,58 @@ if TYPE_CHECKING:
 
 class SkiaDrawingContext(_CairoDrawingContext):
     """Cairo-compatible drawing semantics implemented with Skia paths."""
+
+    def draw(
+        self,
+        mobjects,
+        *,
+        include_submobjects: bool = True,
+        excluded_mobjects=None,
+    ) -> None:
+        import itertools as it
+
+        from manim.mobject.mobject import Mobject
+        from manim.mobject.types.image_mobject import AbstractImageMobject
+        from manim.mobject.types.point_cloud_mobject import PMobject
+        from manim.mobject.types.vectorized_mobject import VMobject
+
+        self.target._ensure_open()
+        display_funcs = {
+            SkSLMobject: self._display_sksl_mobjects,
+            VMobject: self._display_vectorized_mobjects,
+            PMobject: self._display_point_cloud_mobjects,
+            ImageMobjectFromCamera: self._display_image_mobjects,
+            AbstractImageMobject: self._display_image_mobjects,
+            Mobject: lambda batch: None,
+        }
+
+        def type_or_raise(mobject):
+            for mobject_type in display_funcs:
+                if isinstance(mobject, mobject_type):
+                    return mobject_type
+            raise TypeError(
+                f"Displaying an object of class {type(mobject).__name__} is not supported",
+            )
+
+        with self.camera._drawing():
+            to_display = self.camera.get_mobjects_to_display(
+                mobjects,
+                include_submobjects=include_submobjects,
+                excluded_mobjects=excluded_mobjects,
+            )
+            for group_type, group in it.groupby(to_display, type_or_raise):
+                display_funcs[group_type](list(group))
+
+    def _display_sksl_mobjects(self, mobjects) -> None:
+        for mobject in mobjects:
+            coords = self._points_to_subpixel_coords(mobject, mobject.points)
+            quad = [
+                (float(coords[0][0]), float(coords[0][1])),
+                (float(coords[1][0]), float(coords[1][1])),
+                (float(coords[2][0]), float(coords[2][1])),
+                (float(coords[3][0]), float(coords[3][1])),
+            ]
+            self.target.draw_sksl_quad(mobject.source, mobject.uniforms, quad)
 
     def _set_cairo_context_color(self, context, rgbas, vmobject) -> None:
         if len(rgbas) == 1:
@@ -69,33 +123,77 @@ class SkiaDrawingContext(_CairoDrawingContext):
     def _display_background_colored_vmobjects(self, image, vmobjects) -> None:
         if not vmobjects:
             return
-        # CPU compositing below needs the vector content currently on the GPU.
-        self.target.commit()
-        scratch = self.target.get_scratch_target()
-        scratch.clear()
-        scratch_context = SkiaDrawingContext(
-            camera=self.camera,
-            target=scratch,
-            image_resolver=self.image_resolver,
-        )
-        scratch_context._display_non_background_colored_vmobjects(vmobjects)
-        scratch.commit()
         background = self.target.get_background_image(image)
-        colored = np.asarray(
-            background * scratch.pixels.astype(float) / 255,
-            dtype=np.uint8,
-        )
-        self._overlay_rgba_array(self.target.pixels, colored)
-        self.target.mark_cpu_dirty()
+        context = self.target.get_context(self.camera)
+        for vmobject in vmobjects:
+            self._set_cairo_context_path(context, vmobject)
+            self.target.fill_path_with_image(
+                np.ascontiguousarray(background, dtype=np.uint8).tobytes(),
+            )
+            self._apply_stroke(context, vmobject)
 
     def _display_point_cloud_mobjects(self, pmobjects) -> None:
-        # Point clouds are written into target.pixels on the CPU.
-        self.target.commit()
-        super()._display_point_cloud_mobjects(pmobjects)
-        self.target.mark_cpu_dirty()
+        for pmobject in pmobjects:
+            self._draw_point_cloud_native(pmobject)
+
+    def _draw_point_cloud_native(self, pmobject) -> None:
+        points = pmobject.points
+        if len(points) == 0:
+            return
+        pixel_coords = self._points_to_pixel_coords(pmobject, points)
+        thickness = self._adjusted_thickness(pmobject.stroke_width)
+        pixel_coords = self._thickened_coordinates(pixel_coords, thickness)
+        rgbas = np.asarray(pmobject.rgbas, dtype=np.float64).reshape(-1, 4)
+        target_len = len(pixel_coords)
+        if len(rgbas) == 0:
+            return
+        factor = target_len // len(rgbas)
+        int_rgbas = np.repeat((255 * rgbas).astype(np.uint8), factor, axis=0)
+        on_screen = self._on_screen_pixels(pixel_coords)
+        pixel_coords = pixel_coords[on_screen]
+        int_rgbas = int_rgbas[on_screen]
+        entries = [
+            (float(x), float(y), int(r), int(g), int(b), int(a))
+            for (x, y), (r, g, b, a) in zip(pixel_coords, int_rgbas, strict=True)
+        ]
+        self.target.draw_point_pixels(entries, max(0.5, thickness / 2))
 
     def _display_image_mobjects(self, image_mobjects) -> None:
-        # Images are alpha-composited into target.pixels on the CPU.
-        self.target.commit()
-        super()._display_image_mobjects(image_mobjects)
-        self.target.mark_cpu_dirty()
+        for image_mobject in image_mobjects:
+            self._draw_image_mobject_native(image_mobject)
+
+    def _draw_image_mobject_native(self, image_mobject) -> None:
+        source = (
+            self.image_resolver(image_mobject)
+            if isinstance(image_mobject, ImageMobjectFromCamera)
+            else image_mobject.get_pixel_array()
+        )
+        if source is None:
+            return
+        target_coords = self._points_to_subpixel_coords(
+            image_mobject,
+            image_mobject.points,
+        )
+        # ImageMobject points are top-left, top-right, bottom-left, bottom-right.
+        corners = [
+            target_coords[0],
+            target_coords[1],
+            target_coords[3],
+            target_coords[2],
+        ]
+        quad = [(float(x), float(y)) for x, y in corners]
+        from manim.renderer.skia.target import SkiaRenderTarget
+
+        if isinstance(source, SkiaRenderTarget):
+            self.target.draw_target_quad(source, quad, 1.0)
+            return
+        source_pixels = np.ascontiguousarray(source, dtype=np.uint8)
+        if source_pixels.ndim != 3 or source_pixels.shape[2] != 4:
+            return
+        self.target.draw_image_quad(
+            source_pixels.tobytes(),
+            source_pixels.shape[1],
+            source_pixels.shape[0],
+            quad,
+            1.0,
+        )
