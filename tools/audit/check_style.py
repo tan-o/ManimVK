@@ -1,4 +1,4 @@
-from manim import Circle, Square, Text, MathTex, VMobject
+from manim import Circle, Square, Text, MathTex
 
 for obj in [Circle(), Square(), Text("hello"), MathTex("E=mc^2")]:
     print(

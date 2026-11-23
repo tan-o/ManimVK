@@ -1,4 +1,4 @@
-from manim import Animation, Scene, Square, tempconfig
+from manim import Scene, Square, tempconfig
 
 
 with tempconfig(

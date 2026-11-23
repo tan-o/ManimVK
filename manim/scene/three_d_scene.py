@@ -17,7 +17,6 @@ from manim.mobject.value_tracker import ValueTracker
 
 from .. import config
 from ..animation.animation import Animation
-from ..animation.transform import Transform
 from ..constants import DEGREES
 from ..mobject.mobject import Mobject
 from ..mobject.types.vectorized_mobject import VectorizedPoint, VGroup

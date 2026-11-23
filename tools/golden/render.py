@@ -41,7 +41,7 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
 
     import numpy as np  # noqa: F401  (examples use np without importing it)
 
-    from manim import config, tempconfig
+    from manim import tempconfig
     from manim.manager import Manager
 
     def seed() -> None:
