@@ -378,10 +378,6 @@ class Typst(SVGMobject):
             stroke_width=stroke_width,
             height=height,
             color=color,
-            path_string_config={
-                "should_subdivide_sharp_curves": True,
-                "should_remove_null_curves": True,
-            },
             **kwargs,
         )
         self._rebuild_label_aliases()
