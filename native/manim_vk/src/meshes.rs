@@ -88,11 +88,10 @@ uniform float textures;
 Varyings main(const Attributes a) {{
     Varyings v;
     v.position = a.xy;
-    v.point = a.point;
+    // Packed: Skia meshes allow six varyings, `position` included.
+    v.pointDepth = float4(a.point, a.depth);
     v.normal = a.normal;
-    v.uv = a.uv;
-    v.depth = a.depth;
-    v.device = a.xy * toDevice.xy + toDevice.zw;
+    v.coords = float4(a.uv, a.xy * toDevice.xy + toDevice.zw);
     // An untextured surface is lit per vertex, as ManimGL's surface shader.
     v.color = textures < 0.5 ? add_light(baseColor, a.point, normalize(a.normal)) : baseColor;
     return v;
@@ -121,41 +120,45 @@ float4 unpremul(float4 c) {{
     return c.a > 0 ? float4(c.rgb / c.a, c.a) : float4(0);
 }}
 float2 main(const Varyings v, out float4 color) {{
+    float3 point = v.pointDepth.xyz;
+    float depth = v.pointDepth.w;
+    float2 uv = v.coords.xy;
     if (depthTest > 0.5) {{
-        float4 nearest = depthImage.eval(v.device);
-        float opaque = nearest.r + nearest.g / 65535.0;
-        // Behind the nearest opaque mesh (a 16-bit step of slack keeps a
-        // mesh's own pixels): discarded, as by a depth test.  A translucent
-        // surface clears nothing where an opaque mesh is: that mesh shows
-        // through it.
-        if (v.depth < opaque - 1.0 / 65535.0 || (mode > 0.5 && opaque > 0)) {{
+        float3 bytes = floor(depthImage.eval(v.coords.zw).rgb * 255.0 + 0.5);
+        float opaque = dot(bytes, float3(65536.0, 256.0, 1.0)) / 16777215.0;
+        // Behind the nearest opaque mesh: discarded, as by a depth test.
+        // The slack (1/65536 of the depth range, 256 steps of the 24-bit
+        // image) keeps a mesh's own pixels, which Vulkan and Skia rasterise
+        // with slightly different rounding.  A translucent surface clears
+        // nothing where an opaque mesh is: that mesh shows through it.
+        if (depth < opaque - 1.0 / 65536.0 || (mode > 0.5 && opaque > 0)) {{
             color = float4(0);
-            return v.uv;
+            return uv;
         }}
     }}
     if (mode > 0.5) {{
         color = fill;
-        return v.uv;
+        return uv;
     }}
     float4 c = v.color;
     if (textures > 0.5) {{
         float3 n = normalize(v.normal);
-        c = unpremul(lightImage.eval(v.uv * (lightSize - 1) + 0.5));
+        c = unpremul(lightImage.eval(uv * (lightSize - 1) + 0.5));
         if (textures > 1.5) {{
-            float4 dark = unpremul(darkImage.eval(v.uv * (darkSize - 1) + 0.5));
-            float dp = dot(normalize(lightPosition - v.point), n);
+            float4 dark = unpremul(darkImage.eval(uv * (darkSize - 1) + 0.5));
+            float dp = dot(normalize(lightPosition - point), n);
             c = mix(dark, c, smoothstep(-0.2, 0.2, dp));
         }}
         if (c.a == 0) {{
             color = float4(0);
-            return v.uv;
+            return uv;
         }}
-        c = add_light(c * v.color, v.point, n);
+        c = add_light(c * v.color, point, n);
     }}
     // ManimGL draws the surface with its opacity, not the image's alpha;
     // the opacity is applied to the mesh as a layer.
     color = float4(saturate(c.rgb), 1);
-    return v.uv;
+    return uv;
 }}
 "
     )
@@ -172,12 +175,12 @@ pub fn specification() -> PyResult<MeshSpecification> {
         Attribute::new(A::Float2, 32, "uv"),
         Attribute::new(A::Float, 40, "depth"),
     ];
+    // At most six varyings with `position`: the scene point and depth, the
+    // normal, the texture and device coordinates, the vertex colour.
     let varyings = [
-        Varying::new(V::Float3, "point"),
+        Varying::new(V::Float4, "pointDepth"),
         Varying::new(V::Float3, "normal"),
-        Varying::new(V::Float2, "uv"),
-        Varying::new(V::Float, "depth"),
-        Varying::new(V::Float2, "device"),
+        Varying::new(V::Float4, "coords"),
         Varying::new(V::Float4, "color"),
     ];
     MeshSpecification::make(
@@ -311,7 +314,7 @@ impl Mesh {
     }
 
     /// Map the depth keys to `[1/1024, 1 - 1/1024]` over `(low, high)`, so
-    /// that `0` stays free for "no opaque mesh".
+    /// that `0` stays free for "no opaque mesh" (see `depth`).
     pub fn normalise(&mut self, (low, high): (f32, f32)) {
         let Some(keys) = &self.keys else { return };
         let scale = (1.0 - 2.0 / 1024.0) / (high - low).max(f32::MIN_POSITIVE);

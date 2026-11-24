@@ -5,9 +5,11 @@
 //! the depth comes from a small render pass of our own on the same device and
 //! queue: it draws the opaque triangles with a depth test, the way ManimGL
 //! draws surfaces, and writes the nearest depth of every pixel into a colour
-//! image that Skia then samples (see `display_list::Mesh`).  Depth is
-//! normalised to `[0, 1]`, nearer is larger, and `0` means "no opaque mesh";
-//! it is split over the red (high 16 bits) and green (low 16 bits) channels.
+//! image that Skia then samples (see `meshes`).  Depth is normalised to
+//! `[0, 1]`, nearer is larger, and `0` means "no opaque mesh"; it is stored
+//! as 24 bits over the red, green and blue channels, the precision of a
+//! usual depth buffer, in the one colour format every Vulkan device and Skia
+//! support.
 
 use std::ffi::CStr;
 use std::sync::Arc;
@@ -20,7 +22,7 @@ use skia_safe::gpu;
 
 use crate::DeviceInner;
 
-const COLOR_FORMAT: vk::Format = vk::Format::R16G16B16A16_UNORM;
+const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// Floats per vertex: device x and y (pixels), then normalised depth.
 pub const VERTEX_FLOATS: usize = 3;
@@ -41,9 +43,11 @@ const FRAGMENT_SHADER: &str = r"#version 450
 layout(location = 0) in float v_depth;
 layout(location = 0) out vec4 color;
 void main() {
-    float scaled = clamp(v_depth, 0.0, 1.0) * 65535.0;
-    float high = floor(scaled);
-    color = vec4(high / 65535.0, scaled - high, 0.0, 1.0);
+    float bits = floor(clamp(v_depth, 0.0, 1.0) * 16777215.0 + 0.5);
+    float red = floor(bits / 65536.0);
+    float green = floor((bits - red * 65536.0) / 256.0);
+    float blue = bits - red * 65536.0 - green * 256.0;
+    color = vec4(red, green, blue, 255.0) / 255.0;
 }
 ";
 
@@ -644,7 +648,7 @@ impl DepthPass {
                 gpu::vk::Alloc::default(),
                 gpu::vk::ImageTiling::OPTIMAL,
                 gpu::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                gpu::vk::Format::R16G16B16A16_UNORM,
+                gpu::vk::Format::R8G8B8A8_UNORM,
                 1,
                 self.inner.queue_family,
                 None,
@@ -665,7 +669,7 @@ impl DepthPass {
             context,
             &texture,
             gpu::SurfaceOrigin::TopLeft,
-            skia_safe::ColorType::R16G16B16A16UNorm,
+            skia_safe::ColorType::RGBA8888,
             skia_safe::AlphaType::Opaque,
             None,
         )
