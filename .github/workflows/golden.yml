@@ -86,7 +86,9 @@ jobs:
 
       - name: Install manim and the native modules
         run: |
-          uv pip install --system -e . pytest
+          # legacy: pycairo, for the Cairo reference renderer and the tests;
+          # typst: TypstMobject examples; dev: test and example dependencies.
+          uv pip install --system -e ".[legacy,typst]" --group dev
           uv pip install --system ./native/manim_core ./native/manim_vk
           python -c "import manim_vk, manim_core; print('native modules import')"
 
