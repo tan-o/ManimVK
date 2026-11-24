@@ -15,6 +15,10 @@ Verdicts (thresholds are options):
 * REVIEW: drawing matches coarsely but ``rgb_mae`` > 1 or ``changed`` > 10%;
 * PASS: otherwise.
 
+A FAIL or REVIEW scene listed in ``known.json`` (scene id -> reason) is
+reported as KNOWN with its reason: a difference that was checked and is not a
+Vulkan defect.
+
 A scene's verdict is its worst image. A scene that errors with only one
 renderer is a regression to investigate; one that errors with both is reported
 separately (usually a missing tool such as LaTeX)::
@@ -27,13 +31,16 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 IMAGES = ("eval_first", "eval_mid", "eval_last", "final")
-ORDER = {"FAIL": 0, "ERROR_CANDIDATE": 1, "REVIEW": 2, "ERROR_REFERENCE": 3, "ERROR_BOTH": 4, "PASS": 5}
+ORDER = {"FAIL": 0, "ERROR_CANDIDATE": 1, "REVIEW": 2, "KNOWN": 3, "ERROR_REFERENCE": 4, "ERROR_BOTH": 5,
+         "PASS": 6}
+KNOWN = json.loads(Path(__file__).with_name("known.json").read_text(encoding="utf-8"))
 
 
 def load(path: Path) -> np.ndarray:
@@ -121,6 +128,9 @@ def main() -> None:
             m["verdict"] = v
             row["images"][name] = m
             worst = min(worst, v, key=ORDER.__getitem__)
+        if worst in ("FAIL", "REVIEW") and scene_id in KNOWN:
+            worst = "KNOWN"
+            row["known"] = KNOWN[scene_id]
         row["verdict"] = worst
         rows.append(row)
 
@@ -143,22 +153,28 @@ def main() -> None:
         for name, m in r["images"].items():
             if worst_name is None or ORDER[m["verdict"]] < ORDER[worst.get("verdict", "PASS")]:
                 worst_name, worst = name, m
-        error = (r["cand_error"] or r["ref_error"] or "").replace("|", "\\|").replace("\n", " ")[:160]
+        error = (r.get("known") or r["cand_error"] or r["ref_error"] or "").replace("|", "\\|").replace("\n", " ")[:240]
         lines.append(f"| {r['id']} | {r['verdict']} | {worst_name or '-'} | {fmt(worst, 'coarse_mae', '.2f')} | "
                      f"{fmt(worst, 'rgb_mae', '.2f')} | {fmt(worst, 'alpha_mae', '.2f')} | "
                      f"{fmt(worst, 'psnr', '.1f')} | {fmt(worst, 'changed', '.1%')} | {error} |")
     (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # The report directory is self-contained (CI uploads it on its own): the
+    # frames it shows are copied into it.
     cells = []
+    frames = args.out / "frames"
+    frames.mkdir(exist_ok=True)
     for r in rows:
-        if r["verdict"] not in ("FAIL", "REVIEW"):
+        if r["verdict"] not in ("FAIL", "REVIEW", "KNOWN"):
             continue
         for name, m in r["images"].items():
-            if m["verdict"] == "PASS":
+            if m["verdict"] == "PASS" or m.get("missing"):
                 continue
-            ref = (args.reference / r["id"] / f"{name}.png").resolve().as_uri()
-            cand = (args.candidate / r["id"] / f"{name}.png").resolve().as_uri()
-            diff = (args.out / "diff" / f"{r['id']}__{name}.png").resolve().as_uri()
+            for root, side in ((args.reference, "reference"), (args.candidate, "candidate")):
+                shutil.copyfile(root / r["id"] / f"{name}.png", frames / f"{r['id']}__{name}__{side}.png")
+            ref = f"frames/{r['id']}__{name}__reference.png"
+            cand = f"frames/{r['id']}__{name}__candidate.png"
+            diff = f"diff/{r['id']}__{name}.png"
             cells.append(f"<h3>{html.escape(r['id'])} / {name}: {m['verdict']} "
                          f"(coarse {m.get('coarse_mae', 0):.2f}, MAE {m.get('rgb_mae', 0):.2f})</h3>"
                          f"<img src='{ref}' width=420><img src='{cand}' width=420><img src='{diff}' width=420>")

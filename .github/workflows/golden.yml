@@ -26,7 +26,6 @@ jobs:
     timeout-minutes: 240
     env:
       PYTHONIOENCODING: "utf8"
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       ONLY: ${{ github.event.inputs.only }}
 
     steps:
@@ -72,7 +71,17 @@ jobs:
             ragged2e fundus-calligra microtype wasysym physics dvisvgm jknapltx
             wasy cm-super babel-english gnu-freefont mathastext cbfonts-fd xetex
 
+      - name: Select lavapipe
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)
+          echo "lavapipe ICD: $icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
       - name: Show the Vulkan device
+        # Diagnostics only: vulkaninfo can fail on its window-system queries
+        # on a headless runner while offscreen Vulkan works.
+        continue-on-error: true
         run: vulkaninfo --summary
 
       - name: Install manim and the native modules
@@ -130,6 +139,5 @@ jobs:
           name: golden-report
           path: |
             golden/report
-            golden/*/**/status.json
             media/videos
           if-no-files-found: warn
