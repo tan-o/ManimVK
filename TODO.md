@@ -8,7 +8,7 @@
 
 ## 功能与素材
 
-- [ ] **把 `hairy_ball.py` 和两张地球贴图纳入仓库**。目前脚本和 `EarthTextureMap` / `NightEarthTextureMap` 仍在仓库外，换机器后 `HairyEarth` 会缺素材。
+- [ ] **把两张地球贴图放进 `example_scenes/hairy_ball/`**（脚本已入库）。`EarthTextureMap` / `NightEarthTextureMap` 在用户本机。
 - [ ] **跑 `HairyEarth` 的 1080p90 正式片**，并记录每段动画的 it/s。
 - [ ] **确认半透明球遮挡语义**。`PairsOfNullPoints` 中球内坐标轴会被整段挡掉；ManimGL 只挡后加入场景的对象。
 - [ ] **实现交互预览**（swapchain + 输入事件）。目前只有离线渲染；需要在有 GPU 的机器上开发和验收。
