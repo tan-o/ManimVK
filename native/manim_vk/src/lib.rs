@@ -39,6 +39,36 @@ struct DeviceInner {
     queue: vk::Queue,
     queue_family: u32,
     device_name: String,
+    /// The driver reports heap usage (VK_EXT_memory_budget).
+    memory_budget: bool,
+}
+
+impl DeviceInner {
+    /// Bytes in use on the device-local heaps, as the driver counts them:
+    /// every allocation of the process (Skia's, ours, the driver's own).
+    /// None when the driver lacks VK_EXT_memory_budget.
+    fn device_memory_in_use(&self) -> Option<u64> {
+        if !self.memory_budget {
+            return None;
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical_device, &mut properties)
+        };
+        let heaps = properties.memory_properties;
+        Some(
+            (0..heaps.memory_heap_count as usize)
+                .filter(|&heap| {
+                    heaps.memory_heaps[heap]
+                        .flags
+                        .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+                })
+                .map(|heap| budget.heap_usage[heap])
+                .sum(),
+        )
+    }
 }
 
 /// One Skia Ganesh context shared by every target created from the same
@@ -184,6 +214,14 @@ impl Device {
         let device = unsafe { instance.create_device(physical_device, &device_info, None) }
             .map_err(|result| vk_err("vkCreateDevice", result))?;
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
+        // A physical-device query of a supported extension needs no enabling.
+        let memory_budget =
+            unsafe { instance.enumerate_device_extension_properties(physical_device) }
+                .unwrap_or_default()
+                .iter()
+                .any(|extension| {
+                    extension.extension_name_as_c_str() == Ok(vk::EXT_MEMORY_BUDGET_NAME)
+                });
 
         Ok(Self {
             inner: Arc::new(DeviceInner {
@@ -194,6 +232,7 @@ impl Device {
                 queue,
                 queue_family,
                 device_name,
+                memory_budget,
             }),
             gpu: RefCell::new(None),
         })
@@ -1113,6 +1152,18 @@ impl SkiaTarget {
         Ok(())
     }
 
+    /// GPU memory in use, in bytes: `(device, skia, skia_purgeable)`.
+    /// `device` is the driver's count for the device-local heaps (None
+    /// without VK_EXT_memory_budget); `skia` is Ganesh's budgeted resource
+    /// cache, of which `skia_purgeable` is held only for reuse.
+    fn memory_usage(&self) -> (Option<u64>, usize, usize) {
+        (
+            self._inner.device_memory_in_use(),
+            self.context.resource_cache_usage().resource_bytes,
+            self.context.resource_cache_purgeable_bytes(),
+        )
+    }
+
     /// Flush Ganesh and write the RGBA surface directly into a writable
     /// Python buffer (normally a C-contiguous NumPy frame array).  This avoids
     /// the temporary Rust vector and the second Python-side copy done by
@@ -1157,7 +1208,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 5;
+const API_VERSION: u32 = 6;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -7,6 +7,8 @@
 Each frame is drawn and read back.  The time is split into ``cpu`` (Python,
 Rust and Skia recording its GPU commands: ``render_mobjects``) and ``gpu``
 (waiting for the GPU to finish and reading the frame back: ``get_frame``).
+GPU memory is read after every frame: the peak, and how much it grew from
+the first frame to the last (a steady frame should not grow).
 With ``--python-only`` the native target is replaced by one that does
 nothing, which leaves the Python side alone::
 
@@ -85,6 +87,9 @@ class _NullTarget:
     def commit_into(self, frame) -> None:
         pass
 
+    def memory_usage(self) -> tuple[None, int, int]:
+        return (None, 0, 0)
+
 
 class _NullDevice:
     def __init__(self, *args, **kwargs) -> None:
@@ -95,6 +100,22 @@ class _NullDevice:
 
     def create_skia_target(self, width: int, height: int) -> _NullTarget:
         return _NullTarget()
+
+
+def _memory_report(memory) -> str:
+    mb = 1 << 20
+    skia = [usage.skia for usage in memory]
+    report = (
+        f"skia peak {max(skia) / mb:7.1f} MB, "
+        f"growth {(skia[-1] - skia[0]) / mb:+.1f} MB"
+    )
+    device = [usage.device for usage in memory if usage.device is not None]
+    if device:
+        report = (
+            f"device peak {max(device) / mb:7.1f} MB, "
+            f"growth {(device[-1] - device[0]) / mb:+.1f} MB; " + report
+        )
+    return report
 
 
 def main() -> None:
@@ -122,7 +143,7 @@ def main() -> None:
             try:
                 renderer.render_mobjects(mobjects)
                 renderer.get_frame()
-                cpu, gpu = [], []
+                cpu, gpu, memory = [], [], []
                 for frame in range(args.frames):
                     step(frame)
                     started = time.perf_counter()
@@ -131,6 +152,7 @@ def main() -> None:
                     renderer.get_frame()
                     cpu.append(recorded - started)
                     gpu.append(time.perf_counter() - recorded)
+                    memory.append(renderer.memory_usage())
             finally:
                 renderer.close()
             cpu_ms, gpu_ms = 1000 * np.array(cpu), 1000 * np.array(gpu)
@@ -141,6 +163,7 @@ def main() -> None:
                 f"min {total.min():7.1f}, max {total.max():7.1f} "
                 f"({args.frames} frames at {width}x{height})"
             )
+            print(f"{'':6s} {_memory_report(memory)}")
 
 
 if __name__ == "__main__":

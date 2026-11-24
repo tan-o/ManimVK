@@ -20,7 +20,7 @@ from manim.scene.scene_file_writer import SceneFileWriter
 from manim.utils.iterables import list_update
 
 from .rendering import SkiaDrawingContext
-from .target import SkiaRenderTarget, _ImageFiles, _RasterSettings
+from .target import GpuMemory, SkiaRenderTarget, _ImageFiles, _RasterSettings
 
 if TYPE_CHECKING:
     from manim._config.render_session import RenderSessionSpec
@@ -144,6 +144,10 @@ class SkiaRenderer(_RendererExecutionView):
                 self._raster_settings, self._image_files, device=self._ensure_device()
             )
         return self._target
+
+    def memory_usage(self) -> GpuMemory:
+        """GPU memory in use now (see :class:`GpuMemory`)."""
+        return self._get_target().memory_usage()
 
     def _sub_target_for(
         self,

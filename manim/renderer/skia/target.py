@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from PIL import Image
@@ -19,7 +19,21 @@ if TYPE_CHECKING:
     from manim.camera import Camera
     from manim.typing import RGBAPixelArray
 
-__all__ = ["SkiaRenderTarget"]
+__all__ = ["GpuMemory", "SkiaRenderTarget"]
+
+
+class GpuMemory(NamedTuple):
+    """GPU memory in use, in bytes.
+
+    ``device`` is the driver's count for the device-local heaps, every
+    allocation of the process included (None when the driver lacks
+    ``VK_EXT_memory_budget``); ``skia`` is Skia's budgeted resource cache,
+    of which ``skia_purgeable`` is only kept for reuse.
+    """
+
+    device: int | None
+    skia: int
+    skia_purgeable: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +332,10 @@ class SkiaRenderTarget:
         )
         self._native.commit_into(frame)
         return frame
+
+    def memory_usage(self) -> GpuMemory:
+        self._ensure_open()
+        return GpuMemory(*self._native.memory_usage())
 
     def close(self) -> None:
         self._native = None
