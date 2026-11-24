@@ -33,7 +33,7 @@ def test_manim_cfg_subcommand():
     expected_output = f"""\
 Manim Community v{__version__}
 
-Usage: manim cfg [OPTIONS] COMMAND [ARGS]...
+Usage: manim cfg [OPTIONS] [COMMAND] [ARGS]...
 
   Manages Manim configuration files.
 
@@ -108,7 +108,7 @@ def test_manim_init_subcommand():
     expected_output = f"""\
 Manim Community v{__version__}
 
-Usage: manim init [OPTIONS] COMMAND [ARGS]...
+Usage: manim init [OPTIONS] [COMMAND] [ARGS]...
 
   Create a new project or insert a new scene.
 

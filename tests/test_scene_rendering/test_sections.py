@@ -182,18 +182,19 @@ def test_mp4_section_chapters(config, tmp_path, with_sound, save_sections):
                 "开场：Introduction",
                 "Conclusion",
             ]
-            # Chapter times are written in milliseconds.
+            # Chapter times are written in milliseconds; the MP4 muxer stores
+            # them in its own time base, so they read back within 1 ms.
             boundaries = [
                 (
-                    chapter["start"] * chapter["time_base"],
-                    chapter["end"] * chapter["time_base"],
+                    float(chapter["start"] * chapter["time_base"]),
+                    float(chapter["end"] * chapter["time_base"]),
                 )
                 for chapter in chapters
             ]
-            assert boundaries == [
-                (0, Fraction(267, 1000)),
-                (Fraction(267, 1000), Fraction(2, 5)),
-            ]
+            expected = [(0, 0.267), (0.267, 0.4)]
+            for (start, end), (expected_start, expected_end) in zip(boundaries, expected, strict=True):
+                assert start == pytest.approx(expected_start, abs=1e-3)
+                assert end == pytest.approx(expected_end, abs=1e-3)
             if save_sections:
                 # Writing the chapters leaves the sections to the section videos,
                 # which skip the empty trailing section like the chapters do.
