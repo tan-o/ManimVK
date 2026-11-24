@@ -123,6 +123,10 @@ jobs:
           cat scenes/report.md >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
+      - name: Draw hairy ball frames
+        if: ${{ !cancelled() }}
+        run: python tools/scenes/hairy_frames.py --out scenes/hairy --size 854x480
+
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
@@ -131,5 +135,6 @@ jobs:
           path: |
             scenes/report.md
             scenes/frames/*/final.png
+            scenes/hairy/*.png
             media/videos
           if-no-files-found: warn

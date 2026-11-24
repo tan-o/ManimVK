@@ -36,3 +36,15 @@ random generators seeded, and saves under `scenes/frames/<id>/`:
 | `eval_first.png`, `eval_mid.png`, `eval_last.png` | the scene evaluated at the first, middle and last sampled time (0.5s steps) |
 | `final.png` | last frame of a real render to PNG |
 | `status.json` | ok/error, traceback, timings |
+
+## Hairy ball frames
+
+`example_scenes/hairy_ball` is too heavy to render whole on software Vulkan,
+so `collect.py` leaves it out.  `hairy_frames.py` draws key frames of its
+scenes instead (through `Manager.evaluate`, which runs every animation step
+but draws only the requested frames), with plain stand-ins for the Earth
+images unless `--assets` holds them.  CI uploads them with the report.
+
+```bash
+python tools/scenes/hairy_frames.py --out scenes/hairy --size 854x480
+```
