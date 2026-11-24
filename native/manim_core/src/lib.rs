@@ -244,9 +244,14 @@ fn arrow_points<'py>(
     Ok((shafts.into_pyarray(py), tips.into_pyarray(py)))
 }
 
+/// The interface level `manim._native` expects: bump it, there and here,
+/// whenever a function is added or changes its signature or behaviour.
+const API_VERSION: u32 = 1;
+
 #[pymodule]
 fn manim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("API_VERSION", API_VERSION)?;
     m.add_function(wrap_pyfunction!(transform_points, m)?)?;
     m.add_function(wrap_pyfunction!(bounds, m)?)?;
     m.add_function(wrap_pyfunction!(lerp, m)?)?;

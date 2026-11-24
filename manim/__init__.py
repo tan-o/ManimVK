@@ -18,6 +18,7 @@ except PackageNotFoundError:
 # Importing the config module should be the first thing we do, since other
 # modules depend on the global config dict for initialization.
 from ._config import *
+from . import _native  # noqa: F401  (checks the compiled modules)
 
 # many scripts depend on this -> has to be loaded first
 from .utils.commands import *

@@ -1296,11 +1296,16 @@ impl SkiaTarget {
     }
 }
 
+/// The interface level `manim._native` expects: bump it, there and here,
+/// whenever a method is added or changes its signature or behaviour.
+const API_VERSION: u32 = 1;
+
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Device>()?;
     module.add_class::<SkiaTarget>()?;
     module.add_class::<window::NativeWindow>()?;
-    module.add("__version__", "0.1.0")?;
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    module.add("API_VERSION", API_VERSION)?;
     Ok(())
 }
