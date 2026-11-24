@@ -62,14 +62,14 @@ float4 add_light(float4 color, float3 point, float3 unit_normal) {
     float3 to_camera = normalize(cameraPosition - point);
     float3 to_light = normalize(lightPosition - point);
     float light_to_normal = dot(to_light, unit_normal);
-    float bright_factor = max(light_to_normal, 0) * reflectiveness;
+    float bright_factor = max(light_to_normal, 0.0) * reflectiveness;
     float3 light_reflection = reflect(-to_light, unit_normal);
     float light_to_cam = dot(light_reflection, to_camera);
-    float shine = gloss * exp(-3 * pow(1 - light_to_cam, 2));
+    float shine = gloss * exp(-3.0 * pow(1.0 - light_to_cam, 2.0));
     bright_factor += shine;
     result.rgb = mix(result.rgb, float3(1.0), bright_factor);
-    if (light_to_normal < 0) {
-        result.rgb = mix(result.rgb, float3(0.0), max(-light_to_normal, 0) * shadow);
+    if (light_to_normal < 0.0) {
+        result.rgb = mix(result.rgb, float3(0.0), max(-light_to_normal, 0.0) * shadow);
     }
     return result;
 }
@@ -128,8 +128,8 @@ float2 main(const Varyings v, out float4 color) {{
         // image) keeps a mesh's own pixels, which Vulkan and Skia rasterise
         // with slightly different rounding.  A translucent surface clears
         // nothing where an opaque mesh is: that mesh shows through it.
-        if (depth < opaque - 1.0 / 65536.0 || (mode > 0.5 && opaque > 0)) {{
-            color = float4(0);
+        if (depth < opaque - 1.0 / 65536.0 || (mode > 0.5 && opaque > 0.0)) {{
+            color = float4(0.0);
             return uv;
         }}
     }}
@@ -140,21 +140,21 @@ float2 main(const Varyings v, out float4 color) {{
     float4 c = v.color;
     if (textures > 0.5) {{
         float3 n = normalize(v.normal);
-        c = unpremul(lightImage.eval(uv * (lightSize - 1) + 0.5));
+        c = unpremul(lightImage.eval(uv * (lightSize - 1.0) + 0.5));
         if (textures > 1.5) {{
-            float4 dark = unpremul(darkImage.eval(uv * (darkSize - 1) + 0.5));
+            float4 dark = unpremul(darkImage.eval(uv * (darkSize - 1.0) + 0.5));
             float dp = dot(normalize(lightPosition - point), n);
             c = mix(dark, c, smoothstep(-0.2, 0.2, dp));
         }}
-        if (c.a == 0) {{
-            color = float4(0);
+        if (c.a == 0.0) {{
+            color = float4(0.0);
             return uv;
         }}
         c = add_light(c * v.color, point, n);
     }}
     // ManimGL draws the surface with its opacity, not the image's alpha;
     // the opacity is applied to the mesh as a layer.
-    color = float4(saturate(c.rgb), 1);
+    color = float4(saturate(c.rgb), 1.0);
     return uv;
 }}
 "
