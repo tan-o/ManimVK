@@ -4,8 +4,8 @@
 //! context; `SkiaTarget` is a GPU render target that draws Manim's classic
 //! mobjects (paths, images, point clouds, SkSL effects) and reads frames back.
 
+mod display_list;
 mod textures;
-mod vmobjects;
 mod window;
 
 use std::cell::RefCell;
@@ -491,20 +491,6 @@ impl SkiaTarget {
             _ => SamplingOptions::from(CubicResampler::catmull_rom()),
         }
     }
-
-    /// Copy a C-contiguous float32 buffer of `width` columns into a Vec.
-    fn f32_rows(values: &Bound<PyAny>, width: usize, what: &str) -> PyResult<Vec<f32>> {
-        let buffer = PyBuffer::<f32>::get(values)
-            .map_err(|error| PyValueError::new_err(format!("{what}: {error}")))?;
-        if buffer.item_count() % width != 0 {
-            return Err(PyValueError::new_err(format!(
-                "{what} must have {width} columns"
-            )));
-        }
-        buffer
-            .to_vec(values.py())
-            .map_err(|error| PyValueError::new_err(format!("{what}: {error}")))
-    }
 }
 
 #[pymethods]
@@ -575,7 +561,7 @@ impl SkiaTarget {
     /// is `(k, 3)` int64 rows of (start, end, closed): points start..end form
     /// anchors and handles a0 h0 h1 a1 a1' h ... with four points per curve.
     fn set_cubic_path(&mut self, points: &Bound<PyAny>, subpaths: &Bound<PyAny>) -> PyResult<()> {
-        let subpaths = vmobjects::subpath_table(subpaths)?;
+        let subpaths = display_list::subpath_table(subpaths)?;
         let buffer = PyBuffer::<f64>::get(points)
             .map_err(|error| PyValueError::new_err(format!("path points: {error}")))?;
         let shape = buffer.shape().to_vec();
@@ -593,7 +579,7 @@ impl SkiaTarget {
             .collect();
         self.path.reset();
         for (start, end, closed) in subpaths {
-            vmobjects::add_subpath(&mut self.path, &points, start, end, closed);
+            display_list::add_subpath(&mut self.path, &points, start, end, closed);
         }
         Ok(())
     }
@@ -636,15 +622,29 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Draw VMobjects, whole or as depth pieces, in one call; see
-    /// `vmobjects::draw`.  The canvas matrix maps their scene points.
-    fn draw_vmobjects<'py>(
+    /// Draw a frame's VMobjects and textured meshes, whole or as depth
+    /// pieces, in one call; see `display_list::draw`.  The canvas matrix maps
+    /// their scene points.  Mesh textures, with mipmaps, are kept per key.
+    fn draw_display_list<'py>(
         &mut self,
-        objects: Vec<vmobjects::ObjectSpec<'py>>,
+        objects: Vec<display_list::ObjectSpec<'py>>,
+        meshes: Vec<display_list::MeshSpec<'py>>,
         runs: &Bound<'py, PyAny>,
         parts: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
-        vmobjects::draw(self.surface.canvas(), objects, runs, parts)
+        let objects = objects
+            .into_iter()
+            .map(display_list::object)
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut prepared = Vec::with_capacity(meshes.len());
+        for spec in &meshes {
+            let (key, pixels, width, height) = (spec.0, &spec.1, spec.2, spec.3);
+            let texture = self.textures.get(&mut self.context, key, true, || {
+                Self::raster_image(pixels, width, height)
+            })?;
+            prepared.push(display_list::mesh(spec, &texture)?);
+        }
+        display_list::draw(self.surface.canvas(), &objects, &prepared, runs, parts)
     }
 
     fn set_line_width(&mut self, width: f32) {
@@ -652,11 +652,11 @@ impl SkiaTarget {
     }
 
     fn set_line_join(&mut self, join: i32) {
-        self.paint.set_stroke_join(vmobjects::join_of(join));
+        self.paint.set_stroke_join(display_list::join_of(join));
     }
 
     fn set_line_cap(&mut self, cap: i32) {
-        self.paint.set_stroke_cap(vmobjects::cap_of(cap));
+        self.paint.set_stroke_cap(display_list::cap_of(cap));
     }
 
     fn fill_preserve(&mut self) {
@@ -929,87 +929,6 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Draw textured triangles through the current canvas matrix.
-    ///
-    /// `positions` and `uvs` are float32 (n, 2) arrays, `uvs` in texture
-    /// pixels, and `colors` float32 (n, 4), three rows per triangle.  Each
-    /// texel is multiplied by its vertex colour, and the triangles blend over
-    /// each other in order inside one layer composited with `alpha`.  With
-    /// `occlude` (an RGBA colour) the triangles first replace what is under
-    /// them with that colour.  The texture, with mipmaps, is kept per `key`.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (key, pixels, image_width, image_height, positions, uvs, colors, alpha, occlude=None))]
-    fn draw_textured_mesh(
-        &mut self,
-        key: u64,
-        pixels: &Bound<PyAny>,
-        image_width: u32,
-        image_height: u32,
-        positions: &Bound<PyAny>,
-        uvs: &Bound<PyAny>,
-        colors: &Bound<PyAny>,
-        alpha: f32,
-        occlude: Option<(f32, f32, f32, f32)>,
-    ) -> PyResult<()> {
-        let image = self.textures.get(&mut self.context, key, true, || {
-            Self::raster_image(pixels, image_width, image_height)
-        })?;
-        let positions = Self::f32_rows(positions, 2, "mesh positions")?;
-        let uvs = Self::f32_rows(uvs, 2, "mesh uvs")?;
-        let colors = Self::f32_rows(colors, 4, "mesh colors")?;
-        let count = positions.len() / 2;
-        if uvs.len() != count * 2 || colors.len() != count * 4 || count % 3 != 0 {
-            return Err(PyValueError::new_err(
-                "mesh needs matching positions, uvs and colors, three per triangle",
-            ));
-        }
-        if count == 0 {
-            return Ok(());
-        }
-        let points: Vec<Point> = positions
-            .chunks_exact(2)
-            .map(|p| Point::new(p[0], p[1]))
-            .collect();
-        let texs: Vec<Point> = uvs
-            .chunks_exact(2)
-            .map(|p| Point::new(p[0], p[1]))
-            .collect();
-        let vertex_colors: Vec<Color> = colors
-            .chunks_exact(4)
-            .map(|c| Color4f::new(c[0], c[1], c[2], c[3]).to_color())
-            .collect();
-        let vertices =
-            Vertices::new_copy(VertexMode::Triangles, &points, &texs, &vertex_colors, None);
-        let shader = image
-            .to_shader(
-                Some((TileMode::Clamp, TileMode::Clamp)),
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
-                None,
-            )
-            .ok_or_else(|| PyRuntimeError::new_err("Skia mesh texture shader failed"))?;
-        let mut paint = Paint::default();
-        paint.set_anti_alias(true);
-        paint.set_shader(shader);
-        let canvas = self.surface.canvas();
-        if let Some((red, green, blue, opacity)) = occlude {
-            let mut clear = Paint::default();
-            clear.set_shader(skia_safe::shaders::color(
-                Color4f::new(red, green, blue, opacity).to_color(),
-            ));
-            clear.set_blend_mode(BlendMode::Src);
-            canvas.draw_vertices(&vertices, BlendMode::Src, &clear);
-        }
-        let layered = alpha < 1.0;
-        if layered {
-            canvas.save_layer_alpha(None::<Rect>, (alpha.clamp(0.0, 1.0) * 255.0).round() as u32);
-        }
-        canvas.draw_vertices(&vertices, BlendMode::Modulate, &paint);
-        if layered {
-            canvas.restore();
-        }
-        Ok(())
-    }
-
     /// Draw point-cloud pixels directly into the target: ``centers`` is an
     /// ``(n, 2)`` float32 array of device pixel coordinates, ``colors`` an
     /// ``(n, 4)`` uint8 RGBA array, and ``half_size`` the half extent of the
@@ -1272,7 +1191,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 2;
+const API_VERSION: u32 = 3;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {

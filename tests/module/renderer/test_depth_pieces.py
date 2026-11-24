@@ -2,8 +2,8 @@
 
 The camera orders depth pieces (subpaths of depth-tested VMobjects, triangles
 of mesh surfaces) back to front in depth slices; the Skia drawing context sends
-all VMobject runs between two mesh runs in one native call.  The native module
-is a recorder here, so these check calls, not pixels.
+the runs of a frame's VMobjects and meshes in one native call.  The native
+module is a recorder here, so these check calls, not pixels.
 """
 
 from __future__ import annotations
@@ -93,15 +93,9 @@ def test_mesh_layers_blend_base_highlight_and_shadow():
     mesh = MeshSurface(Sphere(resolution=(6, 3)), shading=(0.3, 0.2, 0.4))
     positions, uvs, colors = mesh.get_shaded_mesh(ThreeDCamera(), np.array([0, 5]))
     # Two triangles, three layers each, three vertices per layer.
-    assert (
-        positions.shape == (18, 3)
-    )
-    assert (
-        uvs.shape == (18, 2)
-    )
-    assert (
-        colors.shape == (18, 4)
-    )
+    assert positions.shape == (18, 3)
+    assert uvs.shape == (18, 2)
+    assert colors.shape == (18, 4)
     assert np.all(colors[:3, 3] == 1)  # the base colour is opaque
     np.testing.assert_allclose(colors[:3, :3], np.tile(mesh.color.to_rgb(), (3, 1)))
     unshaded = MeshSurface(Sphere(resolution=(6, 3)), shading=(0, 0, 0))
@@ -138,26 +132,27 @@ class _Target:
 
         return record
 
-    def draw_vmobjects(self, objects, runs, parts):
-        self.calls["draw_vmobjects"] += 1
+    def draw_display_list(self, objects, meshes, runs, parts):
+        self.calls["draw_display_list"] += 1
         assert runs.dtype == np.int64
-        assert runs.shape[1] == 3
+        assert runs.shape[1] == 4
         assert parts.dtype == np.int64
-        for index, start, end in runs.tolist():
-            self.calls["subpaths"] += (
-                end - start if end > start else len(objects[index][1])
+        for kind, index, start, end in runs.tolist():
+            if kind == 0:
+                self.calls["vmobject_runs"] += 1
+                whole = len(objects[index][1])
+                self.calls["subpaths"] += end - start if end > start else whole
+                continue
+            _, _, _, _, positions, uvs, colors, per, alpha, occlude = meshes[index]
+            assert positions.dtype == np.float32
+            assert positions.shape[1] == 2
+            assert len(positions) == len(uvs) == len(colors)
+            self.calls["mesh_runs"] += 1
+            self.calls["mesh_vertices"] += (
+                (end - start) * per if end > start else len(positions)
             )
-
-    def draw_textured_mesh(
-        self, key, texture, width, height, positions, uvs, colors, alpha, occlude
-    ):
-        self.calls["draw_textured_mesh"] += 1
-        self.calls["mesh_vertices"] += len(positions)
-        assert positions.dtype == np.float32
-        assert positions.shape[1] == 2
-        assert len(positions) == len(uvs) == len(colors)
-        if occlude is not None:
-            self.calls["occlude"] += 1
+            if occlude is not None and end > start:
+                self.calls["occlude"] += 1
 
     def restore_static_layer(self):
         return False
@@ -207,8 +202,9 @@ def test_hairs_and_mesh_draw_in_few_runs(calls, tmp_path):
     # Every hair and every triangle is drawn once ...
     assert calls["subpaths"] == 3000
     assert calls["mesh_vertices"] == 2 * 12 * 6 * 3 * 3
-    # ... in a few dozen calls, not one per piece.
-    assert calls["draw_vmobjects"] <= ThreeDCamera.depth_slices
-    assert calls["draw_textured_mesh"] <= ThreeDCamera.depth_slices
+    # ... in a few dozen runs, not one per piece, all in one call per frame.
+    assert calls["draw_display_list"] == 1
+    assert calls["vmobject_runs"] <= ThreeDCamera.depth_slices
+    assert calls["mesh_runs"] <= ThreeDCamera.depth_slices
     # The translucent sphere hides what is behind it.
-    assert calls["occlude"] == calls["draw_textured_mesh"]
+    assert calls["occlude"] == calls["mesh_runs"]

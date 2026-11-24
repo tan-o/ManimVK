@@ -136,7 +136,8 @@ class SkiaDrawingContext:
             for member in root.get_family()
         }
         self._subpath_tables: dict[int, tuple] = {}
-        self._vertex_layers: dict[int, tuple] = {}
+        self._specs: dict[tuple[int, bool], tuple] = {}
+        self._meshes: dict[int, tuple] = {}
         with self.camera._drawing():
             to_display = self.camera.get_mobjects_to_display(
                 mobjects,
@@ -146,19 +147,21 @@ class SkiaDrawingContext:
             order = self.camera.get_draw_order(to_display, roots)
             if not len(order.owner):
                 return
-            # Consecutive runs of one kind of mobject are drawn together.
             kinds = np.array(
                 [_kind(mobject) for mobject in order.mobjects], dtype=np.int64
             )[order.owner]
-            starts = np.flatnonzero(np.diff(kinds, prepend=-1))
+            # Consecutive runs of one kind of mobject are drawn together;
+            # VMobjects and meshes share one display list.
+            batches = np.where(kinds == _MESH, _VMOBJECT, kinds)
+            starts = np.flatnonzero(np.diff(batches, prepend=-1))
             ends = np.append(starts[1:], len(kinds))
             for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
-                self._display_runs(int(kinds[start]), order, start, end)
+                if batches[start] == _VMOBJECT:
+                    self._display_list(order, kinds, start, end)
+                else:
+                    self._display_runs(int(kinds[start]), order, start, end)
 
     def _display_runs(self, kind: int, order: DrawOrder, start: int, end: int) -> None:
-        if kind == _VMOBJECT:
-            self._display_vmobject_runs(order, start, end)
-            return
         runs = list(_slice(order, start, end).runs())
         if kind == _BACKGROUND_COLORED:
             # Whole runs sharing an image share one upload of it.
@@ -173,10 +176,9 @@ class SkiaDrawingContext:
                     )
                 else:
                     for vmobject, pieces in group:
-                        self._display_vmobject_runs(_single(vmobject, pieces), 0, 1)
-        elif kind == _MESH:
-            for surface, pieces in runs:
-                self._display_mesh_surface(surface, pieces)
+                        self._display_list(
+                            _single(vmobject, pieces), np.array([_VMOBJECT]), 0, 1
+                        )
         elif kind == _SKSL:
             self._display_sksl_mobjects([mobject for mobject, _ in runs])
         elif kind == _POINT_CLOUD:
@@ -186,26 +188,58 @@ class SkiaDrawingContext:
 
     # -- vectorized mobjects ---------------------------------------------
 
-    def _display_vmobject_runs(self, order: DrawOrder, start: int, end: int) -> None:
-        """Draw VMobject runs in one native call: each VMobject once, with its
-        points, subpaths and paints, then the runs in order.
+    def _display_list(
+        self, order: DrawOrder, kinds: np.ndarray, start: int, end: int
+    ) -> None:
+        """Draw runs of VMobjects and meshes in one native call: each mobject
+        once (a VMobject's points, subpaths and paints; a mesh's shaded
+        triangles), then the runs in order.
         """
         owners = order.owner[start:end]
         run_start, run_end = order.start[start:end], order.end[start:end]
-        slots, inverse = np.unique(owners, return_inverse=True)
+        slots, first, inverse = np.unique(
+            owners, return_index=True, return_inverse=True
+        )
         pieced = np.zeros(len(slots), dtype=bool)
         np.logical_or.at(pieced, inverse, run_end > run_start)
-        objects = [
-            self._vmobject_spec(order.mobjects[owner], bool(has_pieces))
-            for owner, has_pieces in zip(slots.tolist(), pieced.tolist(), strict=True)
-        ]
-        runs = np.ascontiguousarray(
-            np.stack([inverse.astype(np.int64), run_start, run_end], axis=1)
-        )
+        objects, meshes = [], []
+        index = np.empty(len(slots), dtype=np.int64)
+        for slot, (owner, kind, has_pieces) in enumerate(
+            zip(
+                slots.tolist(),
+                kinds[start:end][first].tolist(),
+                pieced.tolist(),
+                strict=True,
+            )
+        ):
+            mobject = order.mobjects[owner]
+            if kind == _MESH:
+                index[slot] = len(meshes)
+                meshes.append(self._mesh_spec(mobject))
+            else:
+                index[slot] = len(objects)
+                objects.append(self._cached_vmobject_spec(mobject, has_pieces))
+        runs = np.stack(
+            [
+                np.where(kinds[start:end] == _MESH, 1, 0),
+                index[inverse],
+                run_start,
+                run_end,
+            ],
+            axis=1,
+        ).astype(np.int64)
         context = self.target.get_context(self.camera)
-        context.draw_vmobjects(
-            objects, runs, np.ascontiguousarray(order.parts, dtype=np.int64)
+        context.draw_display_list(
+            objects, meshes, runs, np.ascontiguousarray(order.parts, dtype=np.int64)
         )
+
+    def _cached_vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
+        # A VMobject drawn in several display lists of a frame is prepared once.
+        cached = self._specs.get((id(vmobject), pieced))
+        if cached is None or cached[0] is not vmobject:
+            cached = (vmobject, self._vmobject_spec(vmobject, pieced))
+            self._specs[id(vmobject), pieced] = cached
+        return cached[1]
 
     def _vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
         """``(points, subpaths, paints)`` for :meth:`draw_vmobjects`.
@@ -354,41 +388,54 @@ class SkiaDrawingContext:
 
     # -- meshes, SkSL, point clouds and images ------------------------------
 
-    def _display_mesh_surface(
-        self, surface: MeshSurface, pieces: np.ndarray | None
-    ) -> None:
+    def _mesh_spec(self, surface: MeshSurface) -> tuple:
+        """A mesh for :meth:`draw_display_list`, once per frame: the whole
+        surface shaded and projected, float32 positions, texture coordinates
+        and colours with ``per_triangle`` rows per triangle (one triangle per
+        layer), so depth pieces select rows.
+        """
         key = id(surface)
-        layers = self._vertex_layers.get(key)
-        if layers is None or layers[0] is not surface:
-            layers = (surface, surface.get_vertex_layers(self.camera))
-            self._vertex_layers[key] = layers
-        mesh = surface.get_shaded_mesh(self.camera, pieces, layers[1])
+        cached = self._meshes.get(key)
+        if cached is not None and cached[0] is surface:
+            return cached[1]
+        texture, texture_key = surface.get_texture_atlas()
+        mesh = surface.get_shaded_mesh(self.camera)
         if mesh is None:
-            return
-        positions, uvs, colors = mesh
-        positions = self.camera.transform_points_pre_display(surface, positions)
-        # Pieces only come from a depth-sorting camera.  There a translucent
-        # surface clears what was drawn behind it to the background first,
-        # as a depth buffer would hide it.
+            empty = np.zeros((0, 2), dtype=np.float32)
+            positions, uvs, colors, per_triangle = (
+                empty,
+                empty,
+                np.zeros((0, 4), np.float32),
+                3,
+            )
+        else:
+            positions, uvs, colors = mesh
+            positions = self.camera.transform_points_pre_display(surface, positions)
+            per_triangle = len(positions) // len(surface.triangles)
+        # Depth pieces of a translucent surface first clear what was drawn
+        # behind them to the background, as a depth buffer would hide it.
         occlude = None
-        if pieces is not None and surface.get_opacity() < 1:
+        if surface.get_opacity() < 1:
             occlude = tuple(
                 float(c)
                 for c in self.camera.background_color.to_rgba_with_alpha(
                     self.camera.background_opacity
                 )
             )
-        self.target.get_context(self.camera)
-        texture, texture_key = surface.get_texture_atlas()
-        self.target.draw_textured_mesh(
+        spec = (
             texture_key,
             texture,
+            texture.shape[1],
+            texture.shape[0],
             np.ascontiguousarray(positions[:, :2], dtype=np.float32),
             np.ascontiguousarray(uvs, dtype=np.float32),
             np.ascontiguousarray(colors, dtype=np.float32),
-            surface.get_opacity(),
+            per_triangle,
+            float(surface.get_opacity()),
             occlude,
         )
+        self._meshes[key] = (surface, spec)
+        return spec
 
     def _display_sksl_mobjects(self, mobjects: list[SkSLMobject]) -> None:
         for mobject in mobjects:

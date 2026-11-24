@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable, Iterator
 from functools import reduce
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self, overload
 
+import manim_core
 import numpy as np
 
 from manim._config import config
@@ -775,17 +776,7 @@ class ThreeDCamera(Camera):
         depth = np.concatenate(depths)
         group = np.concatenate(groups)
 
-        finite = np.isfinite(depth)
-        slices = np.full(len(depth), self.depth_slices)
-        if finite.any():
-            low, high = depth[finite].min(), depth[finite].max()
-            span = max(high - low, 1e-9)
-            slices[finite] = np.minimum(
-                ((depth[finite] - low) / span * self.depth_slices).astype(int),
-                self.depth_slices - 1,
-            )
-        sort_depth = np.where(finite, depth, 0.0)
-        order = np.lexsort((sort_depth, group, slices))
+        order = manim_core.depth_order(depth, group, self.depth_slices)
         owner, part = owner[order], part[order]
 
         starts = np.flatnonzero(np.diff(owner, prepend=-1) != 0)
@@ -962,22 +953,16 @@ class ThreeDCamera(Camera):
             view if view is not None else self._current_view()
         )
 
-        points = points - frame_center
-        points = np.dot(points, rot_matrix.T)
-        zs = points[:, 2]
-        if self.exponential_projection:
-            # Proper projection would involve multiplying x and y by d / (d-z).
-            # The exponential avoids artifacts for high positive z values.
-            factor = np.exp(zs / focal_distance)
-            lt0 = zs < 0
-            factor[lt0] = focal_distance / (focal_distance - zs[lt0])
-        else:
-            factor = focal_distance / (focal_distance - zs)
-            factor[(focal_distance - zs) < 0] = 10**6
-        scale = factor * zoom
-        for i in 0, 1:
-            points[:, i] *= scale
-        return points
+        # x and y scale by d / (d - z); with exponential_projection by
+        # exp(z / d) for positive z, which avoids artifacts for high z.
+        return manim_core.project_points(
+            np.asarray(points, dtype=np.float64).reshape(-1, 3),
+            tuple(np.asarray(frame_center, dtype=np.float64).reshape(3)),
+            np.asarray(rot_matrix, dtype=np.float64).tolist(),
+            float(focal_distance),
+            float(zoom),
+            bool(self.exponential_projection),
+        )
 
     def project_point(self, point: Point3D) -> Point3D:
         """Applies the current rotation_matrix as a projection

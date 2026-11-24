@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py311"] }
 numpy = "0.24"
+rayon = "1"
 
 [profile.release]
 lto = "thin"

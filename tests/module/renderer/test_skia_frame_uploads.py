@@ -114,7 +114,7 @@ def test_static_layer_is_captured_once_per_play_and_never_uploaded(calls, tmp_pa
     assert calls["load_pixels"] == 0
     assert calls["restore_static_layer"] >= frames
     # All VMobjects of a frame go in one native call, never per point.
-    assert calls["draw_vmobjects"] == calls["restore_static_layer"]
+    assert calls["draw_display_list"] == calls["restore_static_layer"]
     assert calls["move_to"] == calls["curve_to"] == calls["set_cubic_path"] == 0
 
 

@@ -177,6 +177,103 @@ fn cubic_subpaths<'py>(
     Ok((owned.into_pyarray(py), table.into_pyarray(py)))
 }
 
+/// `VMobject.get_subpath_split_indices_from_points`: `(k, 2)` int64 rows of
+/// `[start, end)` point indices, one per subpath; see `geometry::split_indices`.
+#[pyfunction]
+#[pyo3(signature = (points, curve_size=4, n_dims=3, atol=1e-6))]
+fn subpath_split_indices<'py>(
+    py: Python<'py>,
+    points: PyArrayLike2<'py, f64, AllowTypeChange>,
+    curve_size: usize,
+    n_dims: usize,
+    atol: f64,
+) -> PyResult<Bound<'py, PyArray2<i64>>> {
+    let view = points.as_array();
+    if view.ncols() < n_dims || n_dims == 0 || curve_size < 1 {
+        return Err(PyValueError::new_err("bad points, curve_size or n_dims"));
+    }
+    let splits = geometry::split_indices(view, curve_size, n_dims, atol);
+    let table = Array2::from_shape_fn((splits.len(), 2), |(row, column)| {
+        let (start, end) = splits[row];
+        [start as i64, end as i64][column]
+    });
+    Ok(table.into_pyarray(py))
+}
+
+/// `ThreeDCamera.project_points` in one pass; see `geometry::project_points`.
+#[pyfunction]
+#[pyo3(signature = (points, center, rotation, focal_distance, zoom, exponential=false))]
+fn project_points<'py>(
+    py: Python<'py>,
+    points: Points<'py>,
+    center: [f64; 3],
+    rotation: [[f64; 3]; 3],
+    focal_distance: f64,
+    zoom: f64,
+    exponential: bool,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let view = points.as_array();
+    check_points(&view)?;
+    Ok(
+        geometry::project_points(view, center, rotation, focal_distance, zoom, exponential)
+            .into_pyarray(py),
+    )
+}
+
+/// The mean point of each `[start, end)` row of `ranges` (an `(k, 2)` int
+/// table such as `subpath_split_indices` returns); see `geometry::range_means`.
+#[pyfunction]
+fn range_means<'py>(
+    py: Python<'py>,
+    points: PyArrayLike2<'py, f64, AllowTypeChange>,
+    ranges: PyArrayLike2<'py, i64, AllowTypeChange>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let view = points.as_array();
+    let table = ranges.as_array();
+    if table.ncols() != 2 {
+        return Err(PyValueError::new_err("ranges must have 2 columns"));
+    }
+    let rows: Vec<(usize, usize)> = table
+        .rows()
+        .into_iter()
+        .map(|row| (row[0].max(0) as usize, row[1].max(0) as usize))
+        .collect();
+    if rows
+        .iter()
+        .any(|&(start, end)| start >= end || end > view.nrows())
+    {
+        return Err(PyValueError::new_err(
+            "ranges must be non-empty and in bounds",
+        ));
+    }
+    let means = py.allow_threads(|| geometry::range_means(view, &rows));
+    Ok(means.into_pyarray(py))
+}
+
+/// The order that draws depth pieces back to front; see
+/// `geometry::depth_order`.
+#[pyfunction]
+fn depth_order<'py>(
+    py: Python<'py>,
+    depth: PyArrayLike1<'py, f64, AllowTypeChange>,
+    group: PyArrayLike1<'py, i64, AllowTypeChange>,
+    depth_slices: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<i64>>> {
+    let (depth, group) = (depth.as_array(), group.as_array());
+    if depth.len() != group.len() || depth_slices == 0 {
+        return Err(PyValueError::new_err(
+            "depth and group differ in length, or no slices",
+        ));
+    }
+    let (depth, group) = (depth.to_vec(), group.to_vec());
+    let order = py.allow_threads(|| geometry::depth_order(&depth, &group, depth_slices));
+    Ok(order
+        .into_iter()
+        .map(|i| i as i64)
+        .collect::<Vec<_>>()
+        .into_pyarray(py))
+}
+
 /// A copy of `points` with curves beyond `limit` as clamped straight lines;
 /// see `geometry::tame_huge_curves`.
 #[pyfunction]
@@ -206,7 +303,11 @@ fn same_rows(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> PyResult<()> {
 
 /// Straight segments, one cubic each: points of shape `(4n, 3)`.
 #[pyfunction]
-fn line_points<'py>(py: Python<'py>, starts: Points<'py>, ends: Points<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+fn line_points<'py>(
+    py: Python<'py>,
+    starts: Points<'py>,
+    ends: Points<'py>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let (a, b) = (starts.as_array(), ends.as_array());
     same_rows(&a, &b)?;
     Ok(shapes::lines(a, b).into_pyarray(py))
@@ -224,7 +325,9 @@ fn circle_points<'py>(
     let (c, r) = (centers.as_array(), radii.as_array());
     check_points(&c)?;
     if c.nrows() != r.len() || segments == 0 {
-        return Err(PyValueError::new_err("one radius per center and at least one segment"));
+        return Err(PyValueError::new_err(
+            "one radius per center and at least one segment",
+        ));
     }
     Ok(shapes::circles(c, r, segments).into_pyarray(py))
 }
@@ -251,7 +354,7 @@ fn arrow_points<'py>(
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a function is added or changes its signature or behaviour.
-const API_VERSION: u32 = 2;
+const API_VERSION: u32 = 3;
 
 #[pymodule]
 fn manim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -262,6 +365,10 @@ fn manim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lerp, m)?)?;
     m.add_function(wrap_pyfunction!(cubic_subpaths, m)?)?;
     m.add_function(wrap_pyfunction!(tame_huge_curves, m)?)?;
+    m.add_function(wrap_pyfunction!(subpath_split_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(project_points, m)?)?;
+    m.add_function(wrap_pyfunction!(range_means, m)?)?;
+    m.add_function(wrap_pyfunction!(depth_order, m)?)?;
     m.add_function(wrap_pyfunction!(line_points, m)?)?;
     m.add_function(wrap_pyfunction!(circle_points, m)?)?;
     m.add_function(wrap_pyfunction!(arrow_points, m)?)?;

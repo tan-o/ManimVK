@@ -1398,10 +1398,7 @@ class VMobject(Mobject):
         split = self.get_subpath_split_indices_from_points(self.points)
         if len(split) <= 1:
             return None
-        sums = np.zeros((len(self.points) + 1, 3))
-        np.cumsum(self.points, axis=0, out=sums[1:])
-        counts = (split[:, 1] - split[:, 0])[:, None]
-        return (sums[split[:, 1]] - sums[split[:, 0]]) / counts
+        return manim_core.range_means(self.points, split)
 
     def get_subpath_split_indices_from_points(
         self, points: CubicBezierPathLike, n_dims: int = 3
@@ -1432,43 +1429,14 @@ class VMobject(Mobject):
             point index ranges (end-exclusive) of each subpath.
         """
         points = np.asarray(points)
-        nppcc = self.n_points_per_cubic_curve
-        n_pts = len(points)
-        if n_pts < nppcc:
+        if points.ndim != 2 or len(points) == 0:
             return np.empty((0, 2), dtype=int)
-
-        # Point indices where each new cubic curve starts.
-        boundary_indices = np.arange(nppcc, n_pts, nppcc)
-        if len(boundary_indices) == 0:
-            # A single cubic curve: no internal boundaries to split on.
-            return np.array([[0, n_pts]])
-
-        # A boundary is a split where the previous curve's end anchor is not
-        # close to the next curve's start anchor. This is an allocation-light
-        # vectorization of np.isclose semantics: NaN is never close, while
-        # infinities compare equal only when they have the same sign.
-        rtol = 1.0e-5  # default from np.isclose()
-        atol = self.tolerance_for_point_equality
-        ends = points[boundary_indices - 1, :n_dims]  # end of previous curve
-        starts = points[boundary_indices, :n_dims]  # start of next curve
-        # The overwhelmingly common case is a single closed contour whose
-        # adjacent anchors are bit-identical (circles, rectangles, most text
-        # glyphs after an affine transform).  Avoid the tolerance arrays and
-        # split-index construction entirely for it.
-        if np.array_equal(ends, starts):
-            return np.array([[0, n_pts]], dtype=int)
-        with np.errstate(invalid="ignore"):
-            diffs = np.abs(ends - starts)
-            thresholds = atol + rtol * np.abs(starts)
-            is_close = diffs <= thresholds
-            finite_diffs = np.isfinite(diffs)
-            if not finite_diffs.all():
-                is_close &= finite_diffs
-                is_close |= ends == starts
-        is_split = ~np.all(is_close, axis=1)
-
-        split_points = np.concatenate([[0], boundary_indices[is_split], [n_pts]])
-        return np.stack([split_points[:-1], split_points[1:]], axis=1)
+        return manim_core.subpath_split_indices(
+            points,
+            self.n_points_per_cubic_curve,
+            min(n_dims, points.shape[1]),
+            self.tolerance_for_point_equality,
+        )
 
     def get_subpaths(self) -> list[CubicSpline]:
         """Returns subpaths formed by the curves of the VMobject.

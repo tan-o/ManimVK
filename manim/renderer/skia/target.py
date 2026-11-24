@@ -34,7 +34,15 @@ class _RasterSettings:
     line_width_multiple: float = 0.01
 
     def __post_init__(self) -> None:
-        if min(self.pixel_width, self.pixel_height, self.base_pixel_width, self.base_pixel_height) <= 0:
+        if (
+            min(
+                self.pixel_width,
+                self.pixel_height,
+                self.base_pixel_width,
+                self.base_pixel_height,
+            )
+            <= 0
+        ):
             raise ValueError("Raster dimensions must be positive.")
 
     def resized(self, *, pixel_width: int, pixel_height: int) -> _RasterSettings:
@@ -47,7 +55,9 @@ class _RasterSettings:
         )
 
 
-def _rgba_image(image: Image.Image | Path | str, size: tuple[int, int]) -> RGBAPixelArray:
+def _rgba_image(
+    image: Image.Image | Path | str, size: tuple[int, int]
+) -> RGBAPixelArray:
     """The pixels of ``image`` (a file or a PIL image) as RGBA, resized to ``size``."""
     if isinstance(image, (str, Path)):
         with Image.open(get_full_raster_image_path(image)) as source:
@@ -67,7 +77,9 @@ class _ImageFiles:
         # Texture keys of the cached arrays by their id, valid while cached.
         self._keys: dict[int, int] = {}
 
-    def get(self, image: Image.Image | Path | str, size: tuple[int, int]) -> RGBAPixelArray:
+    def get(
+        self, image: Image.Image | Path | str, size: tuple[int, int]
+    ) -> RGBAPixelArray:
         # Only files are cached: an image object can change in place, and its
         # string form names a memory address that another image can reuse.
         if not isinstance(image, (str, Path)):
@@ -99,11 +111,15 @@ class SkiaRenderTarget:
     back only through :meth:`read_pixels` or :meth:`request_yuv420`.
     """
 
-    def __init__(self, settings: _RasterSettings, image_files: _ImageFiles, *, device) -> None:
+    def __init__(
+        self, settings: _RasterSettings, image_files: _ImageFiles, *, device
+    ) -> None:
         self.settings = settings
         #: Image files read for this target, shared with the renderer's other targets.
         self.image_files = image_files
-        self._native = device.create_skia_target(settings.pixel_width, settings.pixel_height)
+        self._native = device.create_skia_target(
+            settings.pixel_width, settings.pixel_height
+        )
         self._background_key: tuple[object, ...] | None = None
         self._image_batches = itertools.count()
         self._native.clear_rgba(0.0, 0.0, 0.0, 0.0)
@@ -130,13 +146,17 @@ class SkiaRenderTarget:
         """Clear to the camera's background: its colour, or its image."""
         self._ensure_open()
         if camera.background_image is None:
-            color = camera.background_color.to_rgba_with_alpha(camera.background_opacity)
+            color = camera.background_color.to_rgba_with_alpha(
+                camera.background_opacity
+            )
             self._native.clear_rgba(*color)
             return
         key = (camera.background_image, self._size)
         if key != self._background_key:
             background = self.image_files.get(camera.background_image, self._size)
-            self._native.set_background_layer(np.ascontiguousarray(background, dtype=np.uint8))
+            self._native.set_background_layer(
+                np.ascontiguousarray(background, dtype=np.uint8)
+            )
             self._background_key = key
         self._native.draw_background_layer()
 
@@ -199,7 +219,11 @@ class SkiaRenderTarget:
             return
         if mix is not None:
             mix_key, mix_pixels, weight = mix
-            mix = (mix_key, np.ascontiguousarray(mix_pixels, dtype=np.uint8), float(weight))
+            mix = (
+                mix_key,
+                np.ascontiguousarray(mix_pixels, dtype=np.uint8),
+                float(weight),
+            )
         self._native.draw_image_quad(
             key,
             pixels,
@@ -236,32 +260,13 @@ class SkiaRenderTarget:
         if key is not None:
             self._native.set_source_image(pixels, *(float(c) for c in rgba), key)
         else:
-            self._native.set_source_image(pixels, *(float(c) for c in rgba), batch, batch is not None)
+            self._native.set_source_image(
+                pixels, *(float(c) for c in rgba), batch, batch is not None
+            )
 
-    def draw_textured_mesh(self, key: int, texture, positions, uvs, colors, alpha: float, occlude=None) -> None:
-        """Draw textured triangles, in scene coordinates, through the canvas matrix.
-
-        ``texture`` is a read-only RGBA array uploaded once per ``key``;
-        ``positions`` and ``uvs`` (in texture pixels) are float32 ``(n, 2)``
-        and ``colors`` float32 ``(n, 4)``, three rows per triangle.  The
-        triangles blend in order inside one layer drawn with ``alpha``.  With
-        ``occlude``, an RGBA colour, the triangles first replace what is
-        under them with that colour.
-        """
-        self._ensure_open()
-        self._native.draw_textured_mesh(
-            key,
-            texture,
-            texture.shape[1],
-            texture.shape[0],
-            positions,
-            uvs,
-            colors,
-            float(alpha),
-            occlude,
-        )
-
-    def draw_point_pixels(self, centers: np.ndarray, colors: np.ndarray, half_size: float) -> None:
+    def draw_point_pixels(
+        self, centers: np.ndarray, colors: np.ndarray, half_size: float
+    ) -> None:
         """Draw point-cloud samples as squares of device pixels: ``(n, 2)``
         float32 centers and ``(n, 4)`` uint8 RGBA colors.
         """
@@ -308,7 +313,9 @@ class SkiaRenderTarget:
         """
         self._ensure_open()
         settings = self.settings
-        frame = np.empty((settings.pixel_height, settings.pixel_width, 4), dtype=np.uint8)
+        frame = np.empty(
+            (settings.pixel_height, settings.pixel_width, 4), dtype=np.uint8
+        )
         self._native.commit_into(frame)
         return frame
 
