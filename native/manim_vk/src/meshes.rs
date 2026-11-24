@@ -1,0 +1,512 @@
+//! Surface meshes (`MeshSurface`, `TexturedSurface`), drawn with Skia's
+//! custom meshes (`SkMesh`) and tested against an exact depth image.
+//!
+//! The shading is ManimGL's: `add_light` is `finalize_color.glsl`, an
+//! untextured surface is lit per vertex as in `surface/vert.glsl`, and a
+//! textured one per pixel, with the day and night images mixed across the
+//! terminator, as in `textured_surface/frag.glsl`.  The depth image holds the
+//! nearest opaque mesh at every pixel (see `depth`); a fragment behind it is
+//! not drawn, as a depth buffer would discard it.
+
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use skia_safe::gpu;
+use skia_safe::mesh::{self, Attribute, Mesh as SkMesh, MeshSpecification, Varying};
+use skia_safe::runtime_effect::ChildPtr;
+use skia_safe::{
+    BlendMode, Blender, Canvas, Data, FilterMode, Image, MipmapMode, Paint, Rect, SamplingOptions,
+    Shader, TileMode,
+};
+
+use crate::depth;
+
+/// One image of a mesh: texture key, RGBA pixels, width, height.
+pub type TextureSpec<'py> = (u64, Bound<'py, PyAny>, u32, u32);
+
+/// One surface mesh, as four groups:
+/// - geometry: float32 projected positions `(n, 2)`, scene points `(n, 3)`,
+///   unit normals `(n, 3)`, texture coordinates `(n, 2)` in `[0, 1]`, the
+///   screen-linear depth key `(n,)` (nearer is larger; `None` without depth
+///   testing) and int32 triangles `(t, 3)`;
+/// - images: the light and dark images, either may be `None`;
+/// - lighting: light position, camera position, shading
+///   `(reflectiveness, gloss, shadow)`;
+/// - style: straight RGBA colour (multiplied with the images), opacity, and
+///   the background colour that clears what lies under translucent depth
+///   pieces, or `None`.
+pub type MeshSpec<'py> = (
+    (
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Bound<'py, PyAny>,
+        Option<Bound<'py, PyAny>>,
+        Bound<'py, PyAny>,
+    ),
+    (Option<TextureSpec<'py>>, Option<TextureSpec<'py>>),
+    ([f32; 3], [f32; 3], [f32; 3]),
+    ([f32; 4], f32, Option<[f32; 4]>),
+);
+
+/// Bytes per vertex: position (2), point (3), normal (3), uv (2), depth (1).
+const STRIDE: usize = 11 * 4;
+
+const LIGHT: &str = r"
+float4 add_light(float4 color, float3 point, float3 unit_normal) {
+    if (shading == float3(0.0)) { return color; }
+    float reflectiveness = shading.x;
+    float gloss = shading.y;
+    float shadow = shading.z;
+    float4 result = color;
+    float3 to_camera = normalize(cameraPosition - point);
+    float3 to_light = normalize(lightPosition - point);
+    float light_to_normal = dot(to_light, unit_normal);
+    float bright_factor = max(light_to_normal, 0) * reflectiveness;
+    float3 light_reflection = reflect(-to_light, unit_normal);
+    float light_to_cam = dot(light_reflection, to_camera);
+    float shine = gloss * exp(-3 * pow(1 - light_to_cam, 2));
+    bright_factor += shine;
+    result.rgb = mix(result.rgb, float3(1.0), bright_factor);
+    if (light_to_normal < 0) {
+        result.rgb = mix(result.rgb, float3(0.0), max(-light_to_normal, 0) * shadow);
+    }
+    return result;
+}
+";
+
+fn vertex_program() -> String {
+    format!(
+        r"
+uniform float4 toDevice;
+uniform float3 lightPosition;
+uniform float3 cameraPosition;
+uniform float3 shading;
+uniform float4 baseColor;
+uniform float textures;
+{LIGHT}
+Varyings main(const Attributes a) {{
+    Varyings v;
+    v.position = a.xy;
+    v.point = a.point;
+    v.normal = a.normal;
+    v.uv = a.uv;
+    v.depth = a.depth;
+    v.device = a.xy * toDevice.xy + toDevice.zw;
+    // An untextured surface is lit per vertex, as ManimGL's surface shader.
+    v.color = textures < 0.5 ? add_light(baseColor, a.point, normalize(a.normal)) : baseColor;
+    return v;
+}}
+"
+    )
+}
+
+fn fragment_program() -> String {
+    format!(
+        r"
+uniform shader lightImage;
+uniform shader darkImage;
+uniform shader depthImage;
+uniform float3 lightPosition;
+uniform float3 cameraPosition;
+uniform float3 shading;
+uniform float textures;
+uniform float2 lightSize;
+uniform float2 darkSize;
+uniform float depthTest;
+uniform float mode;
+uniform float4 fill;
+{LIGHT}
+float4 unpremul(float4 c) {{
+    return c.a > 0 ? float4(c.rgb / c.a, c.a) : float4(0);
+}}
+float2 main(const Varyings v, out float4 color) {{
+    if (depthTest > 0.5) {{
+        float4 nearest = depthImage.eval(v.device);
+        float opaque = nearest.r + nearest.g / 65535.0;
+        // Behind the nearest opaque mesh (a 16-bit step of slack keeps a
+        // mesh's own pixels): discarded, as by a depth test.  A translucent
+        // surface clears nothing where an opaque mesh is: that mesh shows
+        // through it.
+        if (v.depth < opaque - 1.0 / 65535.0 || (mode > 0.5 && opaque > 0)) {{
+            color = float4(0);
+            return v.uv;
+        }}
+    }}
+    if (mode > 0.5) {{
+        color = fill;
+        return v.uv;
+    }}
+    float4 c = v.color;
+    if (textures > 0.5) {{
+        float3 n = normalize(v.normal);
+        c = unpremul(lightImage.eval(v.uv * (lightSize - 1) + 0.5));
+        if (textures > 1.5) {{
+            float4 dark = unpremul(darkImage.eval(v.uv * (darkSize - 1) + 0.5));
+            float dp = dot(normalize(lightPosition - v.point), n);
+            c = mix(dark, c, smoothstep(-0.2, 0.2, dp));
+        }}
+        if (c.a == 0) {{
+            color = float4(0);
+            return v.uv;
+        }}
+        c = add_light(c * v.color, v.point, n);
+    }}
+    // ManimGL draws the surface with its opacity, not the image's alpha;
+    // the opacity is applied to the mesh as a layer.
+    color = float4(saturate(c.rgb), 1);
+    return v.uv;
+}}
+"
+    )
+}
+
+/// The mesh specification, compiled once per target.
+pub fn specification() -> PyResult<MeshSpecification> {
+    use mesh::attribute::Type as A;
+    use mesh::varying::Type as V;
+    let attributes = [
+        Attribute::new(A::Float2, 0, "xy"),
+        Attribute::new(A::Float3, 8, "point"),
+        Attribute::new(A::Float3, 20, "normal"),
+        Attribute::new(A::Float2, 32, "uv"),
+        Attribute::new(A::Float, 40, "depth"),
+    ];
+    let varyings = [
+        Varying::new(V::Float3, "point"),
+        Varying::new(V::Float3, "normal"),
+        Varying::new(V::Float2, "uv"),
+        Varying::new(V::Float, "depth"),
+        Varying::new(V::Float2, "device"),
+        Varying::new(V::Float4, "color"),
+    ];
+    MeshSpecification::make(
+        &attributes,
+        STRIDE,
+        &varyings,
+        vertex_program(),
+        fragment_program(),
+    )
+    .map_err(|error| PyValueError::new_err(format!("mesh shader: {error}")))
+}
+
+fn f32_rows(array: &Bound<PyAny>, width: usize, name: &str) -> PyResult<Vec<f32>> {
+    let buffer = PyBuffer::<f32>::get(array)
+        .map_err(|error| PyValueError::new_err(format!("{name}: {error}")))?;
+    let shape = buffer.shape();
+    let ok = if width == 1 {
+        shape.len() == 1
+    } else {
+        shape.len() == 2 && shape[1] == width
+    };
+    if !ok {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be float32 with {width} columns"
+        )));
+    }
+    buffer
+        .to_vec(array.py())
+        .map_err(|error| PyValueError::new_err(format!("{name}: {error}")))
+}
+
+fn read_image(
+    spec: &Option<TextureSpec>,
+    texture: &mut impl FnMut(&TextureSpec) -> PyResult<Image>,
+) -> PyResult<Option<(Image, [f32; 2])>> {
+    spec.as_ref()
+        .map(|spec| Ok((texture(spec)?, [spec.2 as f32, spec.3 as f32])))
+        .transpose()
+}
+
+pub struct Mesh {
+    /// Interleaved vertices, [`STRIDE`] bytes each.
+    vertices: Vec<f32>,
+    /// Projected positions, for bounds and the depth pass.
+    xy: Vec<[f32; 2]>,
+    /// The screen-linear depth key per vertex, if depth tested.
+    keys: Option<Vec<f32>>,
+    triangles: Vec<[u32; 3]>,
+    light: Option<(Image, [f32; 2])>,
+    dark: Option<(Image, [f32; 2])>,
+    lighting: ([f32; 3], [f32; 3], [f32; 3]),
+    color: [f32; 4],
+    opacity: f32,
+    occlude: Option<[f32; 4]>,
+}
+
+impl Mesh {
+    /// Read a mesh from Python; `texture` turns an image into a GPU texture.
+    pub fn read(
+        spec: &MeshSpec,
+        mut texture: impl FnMut(&TextureSpec) -> PyResult<Image>,
+    ) -> PyResult<Self> {
+        let ((xy, point, normal, uv, keys, triangles), (light, dark), lighting, style) = spec;
+        let xy = f32_rows(xy, 2, "mesh positions")?;
+        let point = f32_rows(point, 3, "mesh points")?;
+        let normal = f32_rows(normal, 3, "mesh normals")?;
+        let uv = f32_rows(uv, 2, "mesh texture coordinates")?;
+        let count = xy.len() / 2;
+        let keys = keys
+            .as_ref()
+            .map(|keys| f32_rows(keys, 1, "mesh depth"))
+            .transpose()?;
+        if point.len() != 3 * count
+            || normal.len() != 3 * count
+            || uv.len() != 2 * count
+            || keys.as_ref().is_some_and(|keys| keys.len() != count)
+        {
+            return Err(PyValueError::new_err("mesh vertex arrays differ in length"));
+        }
+        let buffer = PyBuffer::<i32>::get(triangles)
+            .map_err(|error| PyValueError::new_err(format!("mesh triangles: {error}")))?;
+        if buffer.shape().len() != 2 || buffer.shape()[1] != 3 {
+            return Err(PyValueError::new_err("mesh triangles must be int32 (t, 3)"));
+        }
+        let corners = buffer
+            .to_vec(triangles.py())
+            .map_err(|error| PyValueError::new_err(format!("mesh triangles: {error}")))?;
+        if corners
+            .iter()
+            .any(|&corner| corner < 0 || corner as usize >= count)
+        {
+            return Err(PyValueError::new_err(
+                "mesh triangles name missing vertices",
+            ));
+        }
+        let mut vertices = Vec::with_capacity(count * STRIDE / 4);
+        for index in 0..count {
+            vertices.extend_from_slice(&xy[2 * index..2 * index + 2]);
+            vertices.extend_from_slice(&point[3 * index..3 * index + 3]);
+            vertices.extend_from_slice(&normal[3 * index..3 * index + 3]);
+            vertices.extend_from_slice(&uv[2 * index..2 * index + 2]);
+            vertices.push(0.0); // the normalised depth, set in `normalise`
+        }
+        Ok(Self {
+            light: read_image(light, &mut texture)?,
+            dark: read_image(dark, &mut texture)?,
+            vertices,
+            xy: xy.chunks_exact(2).map(|p| [p[0], p[1]]).collect(),
+            keys,
+            triangles: corners
+                .chunks_exact(3)
+                .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+                .collect(),
+            lighting: *lighting,
+            color: style.0,
+            opacity: style.1,
+            occlude: style.2,
+        })
+    }
+
+    pub fn is_opaque(&self) -> bool {
+        self.opacity >= 1.0
+    }
+
+    pub fn depth_range(&self) -> Option<(f32, f32)> {
+        let keys = self.keys.as_ref()?;
+        let finite = keys.iter().copied().filter(|key| key.is_finite());
+        let low = finite.clone().fold(f32::INFINITY, f32::min);
+        let high = finite.fold(f32::NEG_INFINITY, f32::max);
+        (low <= high).then_some((low, high))
+    }
+
+    /// Map the depth keys to `[1/1024, 1 - 1/1024]` over `(low, high)`, so
+    /// that `0` stays free for "no opaque mesh".
+    pub fn normalise(&mut self, (low, high): (f32, f32)) {
+        let Some(keys) = &self.keys else { return };
+        let scale = (1.0 - 2.0 / 1024.0) / (high - low).max(f32::MIN_POSITIVE);
+        for (index, key) in keys.iter().enumerate() {
+            let depth = if key.is_finite() {
+                1.0 / 1024.0 + (key - low) * scale
+            } else {
+                0.0
+            };
+            self.vertices[index * STRIDE / 4 + 10] = depth;
+        }
+    }
+
+    /// The opaque triangles for the depth pass, in device pixels.
+    pub fn depth_vertices(&self, to_device: [f32; 4], out: &mut Vec<f32>) {
+        if !self.is_opaque() || self.keys.is_none() {
+            return;
+        }
+        for triangle in &self.triangles {
+            for &corner in triangle {
+                let [x, y] = self.xy[corner as usize];
+                out.push(x * to_device[0] + to_device[2]);
+                out.push(y * to_device[1] + to_device[3]);
+                out.push(self.vertices[corner as usize * STRIDE / 4 + 10]);
+            }
+        }
+        debug_assert_eq!(out.len() % depth::VERTEX_FLOATS, 0);
+    }
+
+    fn image_shader(image: &Option<(Image, [f32; 2])>) -> Shader {
+        image
+            .as_ref()
+            .and_then(|(image, _)| {
+                image.to_shader(
+                    Some((TileMode::Clamp, TileMode::Clamp)),
+                    SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+                    None,
+                )
+            })
+            .unwrap_or_else(|| skia_safe::shaders::color(skia_safe::Color::WHITE))
+    }
+
+    /// Draw all triangles, or the listed pieces.  An opaque mesh draws
+    /// straight onto the canvas; a translucent one first clears what lies
+    /// under its depth pieces to the background, then draws in one layer
+    /// with its opacity, so that its own triangles do not show through each
+    /// other.
+    pub fn draw(
+        &self,
+        canvas: &Canvas,
+        context: &mut gpu::DirectContext,
+        frame: &Frame,
+        pieces: Option<&[i64]>,
+    ) -> PyResult<()> {
+        let mut data: Vec<f32> = Vec::new();
+        let (mut low, mut high) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+        let mut push = |triangle: &[u32; 3]| {
+            for &corner in triangle {
+                let start = corner as usize * STRIDE / 4;
+                data.extend_from_slice(&self.vertices[start..start + STRIDE / 4]);
+                let [x, y] = self.xy[corner as usize];
+                low = [low[0].min(x), low[1].min(y)];
+                high = [high[0].max(x), high[1].max(y)];
+            }
+        };
+        match pieces {
+            None => self.triangles.iter().for_each(&mut push),
+            Some(pieces) => pieces
+                .iter()
+                .filter_map(|&piece| self.triangles.get(piece as usize))
+                .for_each(&mut push),
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        let bounds = Rect::new(low[0], low[1], high[0], high[1]);
+        let bytes: Vec<u8> = data.iter().flat_map(|value| value.to_ne_bytes()).collect();
+        let buffer = gpu::ganesh::meshes::make_vertex_buffer(context, &bytes)
+            .ok_or_else(|| PyValueError::new_err("mesh vertex buffer failed"))?;
+        let count = data.len() / (STRIDE / 4);
+        let children = [
+            ChildPtr::from(Self::image_shader(&self.light)),
+            ChildPtr::from(Self::image_shader(&self.dark)),
+            ChildPtr::from(frame.depth.clone()),
+        ];
+        let depth_test = self.keys.is_some() && frame.has_depth;
+        let spec = frame
+            .spec
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("mesh drawn without its shaders"))?;
+        let mesh = |mode: f32, fill: [f32; 4]| -> PyResult<SkMesh> {
+            let uniforms = frame.uniforms(spec, self, depth_test, mode, fill);
+            SkMesh::make(
+                spec.clone(),
+                mesh::Mode::Triangles,
+                buffer.clone(),
+                count,
+                0,
+                Data::new_copy(&uniforms),
+                &children,
+                bounds,
+            )
+            .map_err(|error| PyValueError::new_err(format!("mesh: {error}")))
+        };
+        let translucent = !self.is_opaque();
+        if let (true, Some(_), Some(occlude)) = (translucent, pieces, self.occlude) {
+            // Clear to the background what this surface hides behind it, as
+            // its depth would: erase, then paint the background colour.
+            let mut erase = Paint::default();
+            erase.set_blend_mode(BlendMode::DstOut);
+            canvas.draw_mesh(
+                &mesh(1.0, [0.0, 0.0, 0.0, 1.0])?,
+                Blender::mode(BlendMode::Dst),
+                &erase,
+            );
+            if occlude[3] > 0.0 {
+                let a = occlude[3];
+                let fill = [occlude[0] * a, occlude[1] * a, occlude[2] * a, a];
+                canvas.draw_mesh(
+                    &mesh(1.0, fill)?,
+                    Blender::mode(BlendMode::Dst),
+                    &Paint::default(),
+                );
+            }
+        }
+        if translucent {
+            canvas.save_layer_alpha(
+                None::<Rect>,
+                (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u32,
+            );
+        }
+        canvas.draw_mesh(
+            &mesh(0.0, [0.0; 4])?,
+            Blender::mode(BlendMode::Dst),
+            &Paint::default(),
+        );
+        if translucent {
+            canvas.restore();
+        }
+        Ok(())
+    }
+}
+
+/// What every mesh of a display list shares.
+pub struct Frame {
+    /// The mesh shaders; present whenever the display list has meshes.
+    pub spec: Option<MeshSpecification>,
+    /// The depth image as a shader in device pixels (unused when empty).
+    pub depth: Shader,
+    pub has_depth: bool,
+    pub to_device: [f32; 4],
+}
+
+impl Frame {
+    fn uniforms(
+        &self,
+        spec: &MeshSpecification,
+        mesh: &Mesh,
+        depth_test: bool,
+        mode: f32,
+        fill: [f32; 4],
+    ) -> Vec<u8> {
+        let mut bytes = vec![0u8; spec.uniform_size()];
+        let mut put = |name: &str, values: &[f32]| {
+            if let Some(uniform) = spec.find_uniform(name) {
+                let offset = uniform.offset();
+                for (index, value) in values.iter().enumerate() {
+                    let at = offset + 4 * index;
+                    bytes[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+        };
+        let (light_position, camera_position, shading) = mesh.lighting;
+        let textures = match (&mesh.light, &mesh.dark) {
+            (None, _) => 0.0,
+            (Some(_), None) => 1.0,
+            (Some(_), Some(_)) => 2.0,
+        };
+        put("toDevice", &self.to_device);
+        put("lightPosition", &light_position);
+        put("cameraPosition", &camera_position);
+        put("shading", &shading);
+        put("baseColor", &mesh.color);
+        put("textures", &[textures]);
+        put(
+            "lightSize",
+            &mesh.light.as_ref().map_or([1.0; 2], |(_, size)| *size),
+        );
+        put(
+            "darkSize",
+            &mesh.dark.as_ref().map_or([1.0; 2], |(_, size)| *size),
+        );
+        put("depthTest", &[if depth_test { 1.0 } else { 0.0 }]);
+        put("mode", &[mode]);
+        put("fill", &fill);
+        bytes
+    }
+}

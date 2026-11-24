@@ -4,7 +4,9 @@
 //! context; `SkiaTarget` is a GPU render target that draws Manim's classic
 //! mobjects (paths, images, point clouds, SkSL effects) and reads frames back.
 
+mod depth;
 mod display_list;
+mod meshes;
 mod textures;
 mod window;
 
@@ -299,8 +301,13 @@ struct SkiaTarget {
     /// Camera background image, uploaded once per image.
     background_layer: Option<Image>,
     /// Textures of keyed, immutable pixel arrays: image files, ImageMobject
-    /// sources and mesh atlases.
+    /// sources and mesh images.
     textures: TextureCache,
+    /// The surface mesh shaders, compiled on first use.
+    mesh_spec: Option<skia_safe::mesh::MeshSpecification>,
+    /// The Vulkan pass that gives meshes their exact depth, made on first
+    /// use; it holds the device itself and frees its objects before it.
+    depth_pass: Option<depth::DepthPass>,
     /// The last transient background image (see `set_source_image`).
     transient_image: Option<(u64, Image)>,
     /// YUV reads in flight, oldest first, by ticket.
@@ -357,6 +364,8 @@ impl SkiaTarget {
             background_layer: None,
             textures: TextureCache::default(),
             transient_image: None,
+            mesh_spec: None,
+            depth_pass: None,
             yuv_reads: VecDeque::new(),
             next_ticket: 0,
         })
@@ -578,7 +587,7 @@ impl SkiaTarget {
     fn draw_display_list<'py>(
         &mut self,
         objects: Vec<display_list::ObjectSpec<'py>>,
-        meshes: Vec<display_list::MeshSpec<'py>>,
+        meshes: Vec<meshes::MeshSpec<'py>>,
         runs: &Bound<'py, PyAny>,
         parts: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
@@ -588,13 +597,73 @@ impl SkiaTarget {
             .collect::<PyResult<Vec<_>>>()?;
         let mut prepared = Vec::with_capacity(meshes.len());
         for spec in &meshes {
-            let (key, pixels, width, height) = (spec.0, &spec.1, spec.2, spec.3);
-            let texture = self.textures.get(&mut self.context, key, true, || {
-                Self::raster_image(pixels, width, height)
-            })?;
-            prepared.push(display_list::mesh(spec, &texture)?);
+            prepared.push(meshes::Mesh::read(spec, |(key, pixels, width, height)| {
+                self.textures.get(&mut self.context, *key, true, || {
+                    Self::raster_image(pixels, *width, *height)
+                })
+            })?);
         }
-        display_list::draw(self.surface.canvas(), &objects, &prepared, runs, parts)
+        let to_device = [
+            self.matrix_sx,
+            self.matrix_sy,
+            self.matrix_tx,
+            self.matrix_ty,
+        ];
+        let range = prepared
+            .iter()
+            .filter_map(meshes::Mesh::depth_range)
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let mut depth_vertices = Vec::new();
+        if let Some(range) = range {
+            for mesh in &mut prepared {
+                mesh.normalise(range);
+                mesh.depth_vertices(to_device, &mut depth_vertices);
+            }
+        }
+        let has_depth = !depth_vertices.is_empty();
+        let depth = if has_depth {
+            // Skia's recorded work, which may read the previous depth image,
+            // is submitted before the pass that overwrites it.
+            self.context.flush_and_submit().map_err(|error| {
+                PyRuntimeError::new_err(format!("Skia flush failed: {error:?}"))
+            })?;
+            if self.depth_pass.is_none() {
+                self.depth_pass = Some(depth::DepthPass::new(
+                    self._inner.clone(),
+                    self.width,
+                    self.height,
+                )?);
+            }
+            let pass = self.depth_pass.as_mut().expect("created above");
+            pass.render(&depth_vertices)?;
+            pass.image(&mut self.context)?
+                .to_raw_shader(
+                    Some((TileMode::Clamp, TileMode::Clamp)),
+                    SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+                    None,
+                )
+                .ok_or_else(|| PyRuntimeError::new_err("depth image shader failed"))?
+        } else {
+            skia_safe::shaders::color(Color::TRANSPARENT)
+        };
+        if self.mesh_spec.is_none() && !prepared.is_empty() {
+            self.mesh_spec = Some(meshes::specification()?);
+        }
+        let frame = meshes::Frame {
+            spec: self.mesh_spec.clone(),
+            depth,
+            has_depth,
+            to_device,
+        };
+        display_list::draw(
+            self.surface.canvas(),
+            &mut self.context,
+            &objects,
+            &prepared,
+            &frame,
+            runs,
+            parts,
+        )
     }
 
     fn set_line_width(&mut self, width: f32) {
@@ -1093,7 +1162,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 4;
+const API_VERSION: u32 = 5;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {

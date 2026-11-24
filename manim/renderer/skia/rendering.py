@@ -10,7 +10,7 @@ import manim_core
 import numpy as np
 from PIL import Image
 
-from manim.camera import DrawOrder
+from manim.camera import Camera, DrawOrder, ThreeDCamera
 from manim.constants import CapStyleType, LineJointType
 from manim.mobject.mobject import Mobject
 from manim.mobject.sksl import SkSLMobject
@@ -147,9 +147,17 @@ class SkiaDrawingContext:
             order = self.camera.get_draw_order(to_display, roots)
             if not len(order.owner):
                 return
-            kinds = np.array(
+            mobject_kinds = np.array(
                 [_kind(mobject) for mobject in order.mobjects], dtype=np.int64
-            )[order.owner]
+            )
+            # Every opaque mesh of the frame takes part in the depth pass of
+            # each display list, whichever runs the list draws.
+            self._frame_meshes = [
+                mobject
+                for mobject, kind in zip(order.mobjects, mobject_kinds, strict=True)
+                if kind == _MESH
+            ]
+            kinds = mobject_kinds[order.owner]
             # Consecutive runs of one kind of mobject are drawn together;
             # VMobjects and meshes share one display list.
             batches = np.where(kinds == _MESH, _VMOBJECT, kinds)
@@ -192,8 +200,9 @@ class SkiaDrawingContext:
         self, order: DrawOrder, kinds: np.ndarray, start: int, end: int
     ) -> None:
         """Draw runs of VMobjects and meshes in one native call: each mobject
-        once (a VMobject's points, subpaths and paints; a mesh's shaded
-        triangles), then the runs in order.
+        once (a VMobject's points, subpaths and paints; a mesh's vertices),
+        then the runs in order.  The frame's other meshes come last, for the
+        depth of the opaque ones.
         """
         owners = order.owner[start:end]
         run_start, run_end = order.start[start:end], order.end[start:end]
@@ -219,6 +228,12 @@ class SkiaDrawingContext:
             else:
                 index[slot] = len(objects)
                 objects.append(self._cached_vmobject_spec(mobject, has_pieces))
+        drawn = {id(order.mobjects[owner]) for owner in slots.tolist()}
+        meshes += [
+            self._mesh_spec(mesh)
+            for mesh in self._frame_meshes
+            if id(mesh) not in drawn and mesh.get_opacity() >= 1
+        ]
         runs = np.stack(
             [
                 np.where(kinds[start:end] == _MESH, 1, 0),
@@ -387,50 +402,60 @@ class SkiaDrawingContext:
     # -- meshes, SkSL, point clouds and images ------------------------------
 
     def _mesh_spec(self, surface: MeshSurface) -> tuple:
-        """A mesh for :meth:`draw_display_list`, once per frame: the whole
-        surface shaded and projected, float32 positions, texture coordinates
-        and colours with ``per_triangle`` rows per triangle (one triangle per
-        layer), so depth pieces select rows.
+        """A mesh for :meth:`draw_display_list`, once per frame (see the
+        native ``meshes`` module): its projected vertices, its scene points
+        and normals for ManimGL's lighting, its images and, in a 3D camera,
+        the depth key of every vertex for the Vulkan depth pass.
         """
         key = id(surface)
         cached = self._meshes.get(key)
         if cached is not None and cached[0] is surface:
             return cached[1]
-        texture, texture_key = surface.get_texture_atlas()
-        mesh = surface.get_shaded_mesh(self.camera)
-        if mesh is None:
-            empty = np.zeros((0, 2), dtype=np.float32)
-            positions, uvs, colors, per_triangle = (
-                empty,
-                empty,
-                np.zeros((0, 4), np.float32),
-                3,
+        camera = self.camera
+        points = np.asarray(surface.points, dtype=np.float64).reshape(-1, 3)
+        projected = camera.transform_points_pre_display(surface, points)
+        depth = None
+        if isinstance(camera, ThreeDCamera) and len(points):
+            # x and y scale by d / (d - z), so 1 / (d - z) is linear across a
+            # projected triangle (as 1 / w is for a GPU) and interpolates to
+            # the exact depth of every pixel.  Nearer is larger.
+            distance = camera.get_focal_distance() - projected[:, 2]
+            depth = np.ascontiguousarray(
+                1 / np.maximum(distance, 1e-6), dtype=np.float32
             )
-        else:
-            positions, uvs, colors = mesh
-            positions = self.camera.transform_points_pre_display(surface, positions)
-            per_triangle = len(positions) // len(surface.triangles)
+        images = [
+            (texture_key, pixels, pixels.shape[1], pixels.shape[0])
+            for pixels, texture_key in surface.get_images()
+        ]
+        light, dark = (*images, None, None)[:2]
+        # A textured surface shows its images as they are, as in ManimGL.
+        color = (1.0, 1.0, 1.0, 1.0) if images else (*surface.color.to_rgb(), 1.0)
         # Depth pieces of a translucent surface first clear what was drawn
         # behind them to the background, as a depth buffer would hide it.
         occlude = None
         if surface.get_opacity() < 1:
             occlude = tuple(
                 float(c)
-                for c in self.camera.background_color.to_rgba_with_alpha(
-                    self.camera.background_opacity
+                for c in camera.background_color.to_rgba_with_alpha(
+                    camera.background_opacity
                 )
             )
         spec = (
-            texture_key,
-            texture,
-            texture.shape[1],
-            texture.shape[0],
-            np.ascontiguousarray(positions[:, :2], dtype=np.float32),
-            np.ascontiguousarray(uvs, dtype=np.float32),
-            np.ascontiguousarray(colors, dtype=np.float32),
-            per_triangle,
-            float(surface.get_opacity()),
-            occlude,
+            (
+                np.ascontiguousarray(projected[:, :2], dtype=np.float32),
+                np.ascontiguousarray(points, dtype=np.float32),
+                np.ascontiguousarray(surface.get_vertex_normals(), dtype=np.float32),
+                np.ascontiguousarray(surface.im_coords, dtype=np.float32),
+                depth,
+                np.ascontiguousarray(surface.triangles, dtype=np.int32),
+            ),
+            (light, dark),
+            (
+                tuple(float(c) for c in camera.light_source.get_center()),
+                tuple(float(c) for c in _camera_position(camera)),
+                tuple(float(c) for c in surface.shading),
+            ),
+            (tuple(float(c) for c in color), float(surface.get_opacity()), occlude),
         )
         self._meshes[key] = (surface, spec)
         return spec
@@ -537,3 +562,14 @@ class SkiaDrawingContext:
             + settings.pixel_height / 2
         )
         return result
+
+
+def _camera_position(camera: Camera) -> np.ndarray:
+    """Where the camera looks from, for ManimGL's lighting: the frame centre
+    moved back by the focal distance along the view direction.
+    """
+    center = np.asarray(camera.frame_center, dtype=float)
+    rotation = getattr(camera, "get_rotation_matrix", None)
+    if rotation is None:
+        return center + np.array([0.0, 0.0, 20.0])
+    return center + camera.get_focal_distance() * rotation()[2]

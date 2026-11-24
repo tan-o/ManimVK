@@ -4,7 +4,7 @@ from __future__ import annotations
 
 __all__ = ["MeshSurface", "TexturedSurface"]
 
-from functools import lru_cache
+from functools import cache
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any
 
@@ -18,75 +18,31 @@ from manim.utils.color import ManimColor, ParsableManimColor, interpolate_color
 from manim.utils.images import get_full_raster_image_path, new_texture_key
 
 if TYPE_CHECKING:
-    from typing_extensions import Self
-
-    from manim.camera import Camera
-
-# How far either side of facing the light the day and night images blend.
-_DARK_SHIFT = 0.2
-# Rows between atlas regions, filled with the neighbouring edge rows so that
-# mipmapped sampling near one region's edge does not pick up the next region.
-_GUTTER = 32
-# Height of the white region that, tinted by vertex colours, gives solid
-# colours, highlights and shadows.
-_SOLID = 64
+    from typing import Self
 
 
-@lru_cache(maxsize=None)
-def _texture_atlas(
-    image_file: str | None, dark_image_file: str | None
-) -> tuple[np.ndarray, dict[str, float | None]]:
-    """Stack the day image, the night image and a white region in one texture.
-
-    Skia's ``drawVertices`` takes one shader, so one texture holds every
-    layer a triangle is drawn with; vertex colours tint and fade each layer.
-    The array is kept for the process lifetime and is read-only, and
-    ``layout["key"]`` names its GPU texture.  With no image this is the
-    shared white texture of every :class:`MeshSurface`.
+@cache
+def _image(image_file: str) -> tuple[np.ndarray, int]:
+    """An image file's RGBA pixels, read-only and kept for the process
+    lifetime, and the key of its GPU texture.
     """
-    regions: list[np.ndarray] = []
-    if image_file is not None:
-        regions.append(np.asarray(Image.open(get_full_raster_image_path(image_file)).convert("RGBA")))
-        height, width = regions[0].shape[:2]
-        if dark_image_file is not None:
-            night = Image.open(get_full_raster_image_path(dark_image_file)).convert("RGBA")
-            regions.append(np.asarray(night.resize((width, height), Image.Resampling.LANCZOS)))
-    else:
-        width, height = _SOLID, _SOLID
-    regions.append(np.full((_SOLID, width, 4), 255, dtype=np.uint8))
-
-    rows, offsets = [], []
-    top = 0
-    for index, region in enumerate(regions):
-        if index:
-            rows.append(np.repeat(regions[index - 1][-1:], _GUTTER // 2, axis=0))
-            rows.append(np.repeat(region[:1], _GUTTER // 2, axis=0))
-            top += _GUTTER
-        offsets.append(top)
-        rows.append(region)
-        top += len(region)
-    atlas = np.ascontiguousarray(np.concatenate(rows))
-    atlas.flags.writeable = False
-    layout: dict[str, float | None] = {
-        "width": width,
-        "height": height,
-        "day": offsets[0] if image_file is not None else None,
-        "night": offsets[1] if dark_image_file is not None else None,
-        "white": offsets[-1] + _SOLID / 2,
-        "key": new_texture_key(),
-    }
-    return atlas, layout
+    pixels = np.ascontiguousarray(
+        Image.open(get_full_raster_image_path(image_file)).convert("RGBA")
+    )
+    pixels.flags.writeable = False
+    return pixels, new_texture_key()
 
 
 class MeshSurface(Mobject):
     """A :class:`.Surface` drawn as one smoothly shaded triangle mesh.
 
     Where a :class:`.Surface` is a group of flat faces, each drawn on its own,
-    this is one mesh lit per vertex like ManimGL surfaces, and drawn in one GPU
-    call.  In a :class:`.ThreeDScene` its triangles are ordered by depth
-    together with other depth-tested mobjects (see
-    :meth:`.Mobject.apply_depth_test`), so that it hides what is behind it.
-    A translucent mesh surface hides depth-tested mobjects behind it too, as a
+    this is one mesh lit per vertex like ManimGL's surfaces (with ManimGL's
+    lighting), and drawn in one GPU call.  In a :class:`.ThreeDScene`, opaque
+    mesh surfaces hide each other per pixel through a Vulkan depth buffer,
+    and their triangles are ordered by depth together with other
+    depth-tested mobjects (see :meth:`.Mobject.apply_depth_test`).  A
+    translucent mesh surface hides depth-tested mobjects behind it too, as a
     depth buffer would, and shows the camera background through itself.
     Drawn by the Vulkan renderer only.
 
@@ -124,7 +80,9 @@ class MeshSurface(Mobject):
     ) -> None:
         if not isinstance(uv_surface, Surface):
             raise TypeError("uv_surface must be a Surface")
-        faces = {(face.u_index, face.v_index): face for face in uv_surface.list_of_faces}
+        faces = {
+            (face.u_index, face.v_index): face for face in uv_surface.list_of_faces
+        }
         nu = 1 + max(i for i, _ in faces)
         nv = 1 + max(j for _, j in faces)
         grid = np.zeros((nu + 1, nv + 1, 3))
@@ -146,12 +104,16 @@ class MeshSurface(Mobject):
         self.depth_test = True
         self.points = grid.reshape(-1, 3)
 
-        u, v = np.meshgrid(np.linspace(0, 1, nu + 1), np.linspace(0, 1, nv + 1), indexing="ij")
+        u, v = np.meshgrid(
+            np.linspace(0, 1, nu + 1), np.linspace(0, 1, nv + 1), indexing="ij"
+        )
         self.im_coords = np.column_stack([u.ravel(), 1 - v.ravel()])
         index = np.arange((nu + 1) * (nv + 1)).reshape(nu + 1, nv + 1)
         a, b = index[:-1, :-1].ravel(), index[1:, :-1].ravel()
         c, d = index[1:, 1:].ravel(), index[:-1, 1:].ravel()
-        self.triangles = np.concatenate([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
+        self.triangles = np.concatenate(
+            [np.column_stack([a, b, c]), np.column_stack([a, c, d])]
+        )
 
     # -- colour and opacity ----------------------------------------------
     def get_opacity(self) -> float:
@@ -162,7 +124,10 @@ class MeshSurface(Mobject):
         return self
 
     def set_color(
-        self, color: ParsableManimColor, opacity: float | None = None, family: bool = True
+        self,
+        color: ParsableManimColor,
+        opacity: float | None = None,
+        family: bool = True,
     ) -> Self:
         self.color = ManimColor.parse(color)
         if opacity is not None:
@@ -173,99 +138,51 @@ class MeshSurface(Mobject):
         self.opacity *= 1 - darkness
         return self
 
-    def interpolate_color(self, mobject1: Mobject, mobject2: Mobject, alpha: float) -> Self:
+    def interpolate_color(
+        self, mobject1: Mobject, mobject2: Mobject, alpha: float
+    ) -> Self:
         self.color = interpolate_color(mobject1.color, mobject2.color, alpha)
         self.opacity = float(interpolate(mobject1.opacity, mobject2.opacity, alpha))
         return self
 
     # -- drawing ---------------------------------------------------------
-    def _atlas_files(self) -> tuple[str | None, str | None]:
-        return None, None
-
-    def get_texture_atlas(self) -> tuple[np.ndarray, int]:
-        """The read-only texture atlas and the key of its GPU texture."""
-        atlas, layout = _texture_atlas(*self._atlas_files())
-        return atlas, int(layout["key"])
+    def get_images(self) -> list[tuple[np.ndarray, int]]:
+        """The read-only RGBA images drawn on the surface (none, the day
+        image, or the day and night images) with their texture keys.
+        """
+        return []
 
     def get_depth_pieces(self) -> np.ndarray:
         """The corners of each triangle, shape ``(n, 3, 3)``."""
         return self.points[self.triangles]
 
-    def _vertex_normals(self) -> np.ndarray:
+    def get_vertex_normals(self) -> np.ndarray:
+        """Unit normals at the vertices, pointing along ``du x dv``.
+
+        A vertex takes the area-weighted mean normal of the triangles around
+        it, counting every vertex at the same position (the seam where ``u``
+        wraps, the poles of a sphere) as one, so that the lighting is smooth
+        across seams and degenerate triangles leave no vertex without a
+        normal.
+        """
+        if len(self.points) == 0:
+            return np.zeros((0, 3))
         corners = self.points[self.triangles]
-        face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
-        vertices = self.triangles.ravel()
-        repeated = np.repeat(face_normals, 3, axis=0)
-        count = len(self.points)
-        normals = np.column_stack(
-            [np.bincount(vertices, weights=repeated[:, k], minlength=count) for k in range(3)]
+        face_normals = np.cross(
+            corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
         )
+        scale = max(float(np.ptp(self.points)), 1e-12)
+        _, welded = np.unique(
+            np.round(self.points / scale, 9), axis=0, return_inverse=True
+        )
+        welded = welded.ravel()
+        sums = np.zeros((welded.max() + 1, 3))
+        np.add.at(
+            sums, welded[self.triangles.ravel()], np.repeat(face_normals, 3, axis=0)
+        )
+        normals = sums[welded]
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
         return normals / np.where(lengths == 0, 1, lengths)
-
-    def _base_layers(
-        self, layout: dict, facing: np.ndarray
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
-        """(uv, rgba) per vertex for the layers under the lighting layers."""
-        count = len(self.points)
-        white = np.tile([layout["width"] / 2, layout["white"]], (count, 1))
-        rgba = np.tile([*self.color.to_rgb(), 1.0], (count, 1))
-        return [(white, rgba)]
-
-    def get_vertex_layers(self, camera: Camera) -> tuple[np.ndarray, np.ndarray]:
-        """Per-vertex texture coordinates and colours of every layer, shapes
-        ``(layers, vertices, 2)`` and ``(layers, vertices, 4)``.
-
-        The layers are the base colour or image(s), then a white highlight and
-        a black shadow; each is a texel times its vertex colour blended over
-        the ones before, which evaluates ManimGL's surface lighting at the
-        vertices.
-        """
-        _, layout = _texture_atlas(*self._atlas_files())
-        points = self.points
-        normals = self._vertex_normals()
-        to_light = camera.light_source.get_center() - points
-        to_light /= np.maximum(np.linalg.norm(to_light, axis=1, keepdims=True), 1e-12)
-        facing = np.einsum("ij,ij->i", normals, to_light)
-
-        layers = self._base_layers(layout, facing)
-        white = np.tile([layout["width"] / 2, layout["white"]], (len(points), 1))
-        reflectiveness, gloss, shadow = self.shading
-        if reflectiveness or gloss:
-            bright = np.maximum(facing, 0) * reflectiveness
-            if gloss:
-                to_camera = _camera_position(camera) - points
-                to_camera /= np.maximum(np.linalg.norm(to_camera, axis=1, keepdims=True), 1e-12)
-                reflection = 2 * facing[:, None] * normals - to_light
-                light_to_camera = np.einsum("ij,ij->i", reflection, to_camera)
-                bright = bright + gloss * np.exp(-3 * (1 - light_to_camera) ** 2)
-            highlight = np.ones((len(points), 4))
-            highlight[:, 3] = np.clip(bright, 0, 1)
-            layers.append((white, highlight))
-        if shadow:
-            darkening = np.zeros((len(points), 4))
-            darkening[:, 3] = np.clip(np.maximum(-facing, 0) * shadow, 0, 1)
-            layers.append((white, darkening))
-        return np.stack([uv for uv, _ in layers]), np.stack([rgba for _, rgba in layers])
-
-    def get_shaded_mesh(
-        self,
-        camera: Camera,
-        pieces: np.ndarray | None = None,
-        vertex_layers: tuple[np.ndarray, np.ndarray] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Vertices, texture coordinates and colours of the triangles to draw:
-        each triangle once per layer of :meth:`get_vertex_layers`, which may be
-        passed in when several runs of one surface are drawn in a frame."""
-        triangles = self.triangles if pieces is None else self.triangles[pieces]
-        if len(triangles) == 0 or len(self.points) == 0:
-            return None
-        uv_layers, rgba_layers = vertex_layers or self.get_vertex_layers(camera)
-        count = len(uv_layers)
-        positions = np.repeat(self.points[triangles][:, None], count, axis=1)
-        uvs = uv_layers[:, triangles].transpose(1, 0, 2, 3)
-        colors = rgba_layers[:, triangles].transpose(1, 0, 2, 3)
-        return positions.reshape(-1, 3), uvs.reshape(-1, 2), colors.reshape(-1, 4)
 
 
 class TexturedSurface(MeshSurface):
@@ -275,7 +192,8 @@ class TexturedSurface(MeshSurface):
     left to right across the image and ``v`` bottom to top.  With
     ``dark_image_file``, the side facing away from the camera's light source
     shows that image instead, blended across the terminator, like the night
-    side of the Earth.  Drawn like a :class:`MeshSurface`.
+    side of the Earth.  As in ManimGL, the images are mixed and lit per
+    pixel.  Drawn like a :class:`MeshSurface`.
 
     Parameters
     ----------
@@ -297,7 +215,9 @@ class TexturedSurface(MeshSurface):
         class Earth(ThreeDScene):
             def construct(self):
                 self.set_camera_orientation(phi=70 * DEGREES, theta=30 * DEGREES)
-                earth = TexturedSurface(Sphere(radius=3), "earth_day.jpg", "earth_night.jpg")
+                earth = TexturedSurface(
+                    Sphere(radius=3), "earth_day.jpg", "earth_night.jpg"
+                )
                 self.add(earth)
                 self.play(Rotate(earth, TAU, axis=OUT), run_time=8)
     """
@@ -315,31 +235,6 @@ class TexturedSurface(MeshSurface):
         self.dark_image_file = None if dark_image_file is None else str(dark_image_file)
         super().__init__(uv_surface, opacity=opacity, shading=shading, **kwargs)
 
-    def _atlas_files(self) -> tuple[str | None, str | None]:
-        return self.image_file, self.dark_image_file
-
-    def _base_layers(
-        self, layout: dict, facing: np.ndarray
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
-        width, height = layout["width"], layout["height"]
-        image_x = self.im_coords[:, 0] * (width - 1) + 0.5
-        image_y = self.im_coords[:, 1] * (height - 1) + 0.5
-        count = len(self.points)
-        layers = []
-        if layout["night"] is not None:
-            layers.append((np.column_stack([image_x, image_y + layout["night"]]), np.ones((count, 4))))
-            day = np.clip((facing + _DARK_SHIFT) / (2 * _DARK_SHIFT), 0, 1)
-            day_rgba = np.ones((count, 4))
-            day_rgba[:, 3] = day * day * (3 - 2 * day)
-        else:
-            day_rgba = np.ones((count, 4))
-        layers.append((np.column_stack([image_x, image_y + layout["day"]]), day_rgba))
-        return layers
-
-
-def _camera_position(camera: Camera) -> np.ndarray:
-    center = np.asarray(camera.frame_center, dtype=float)
-    rotation = getattr(camera, "get_rotation_matrix", None)
-    if rotation is None:
-        return center + np.array([0.0, 0.0, 20.0])
-    return center + camera.get_focal_distance() * rotation()[2]
+    def get_images(self) -> list[tuple[np.ndarray, int]]:
+        files = [self.image_file, self.dark_image_file]
+        return [_image(file) for file in files if file is not None]

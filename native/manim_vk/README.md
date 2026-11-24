@@ -49,11 +49,18 @@ DOCS_RS=1 cargo clippy
   `manim/_native.py`; bump both when a binding changes.  `import manim`
   refuses an extension built from older sources.
 - Display list (`display_list.rs`): `draw_display_list(objects, meshes, runs,
-  parts)` draws a frame's VMobjects and textured meshes in one call.  Each
+  parts)` draws a frame's VMobjects and surface meshes in one call.  Each
   VMobject comes once (projected points, `(start, end, closed)` subpath rows,
-  prebuilt paints), each mesh once (shaded triangles), then `(kind, object,
-  start, end)` runs in drawing order, each drawing a whole object or the depth
-  pieces `parts[start..end]`.
+  prebuilt paints), each mesh once (vertices, triangles, images, lighting),
+  then `(kind, object, start, end)` runs in drawing order, each drawing a
+  whole object or the depth pieces `parts[start..end]`.
+- Meshes (`meshes.rs`) are Skia custom meshes (`SkMesh`) whose SkSL is
+  ManimGL's surface shading (`finalize_color.glsl`, `surface`,
+  `textured_surface`).  Their depth (`depth.rs`) comes from a Vulkan render
+  pass of our own with a real depth attachment, on the same device and queue
+  as Skia: it draws the opaque mesh triangles once per frame, and the mesh
+  fragment shader discards what lies behind the nearest one.  Its shaders
+  are GLSL, compiled to SPIR-V with naga.
 
 - Keyed textures (`textures.rs`): Python names every read-only pixel array
   (image files, `ImageMobject` sources, mesh atlases) with a process-unique

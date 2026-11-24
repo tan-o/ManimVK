@@ -1,8 +1,8 @@
-//! A frame's VMobjects and textured meshes, drawn in one call.
+//! A frame's VMobjects and surface meshes, drawn in one call.
 //!
 //! Python sends each VMobject once per frame, as its projected points, its
 //! subpaths and its paints (background stroke, fill, stroke), and each mesh
-//! once, as its shaded triangles; then a list of runs in drawing order.  A
+//! once (see `meshes`); then a list of runs in drawing order.  A
 //! run draws one object: all of it, or the depth pieces listed for it
 //! (subpaths of a VMobject, triangles of a mesh).  A field of 50 000
 //! depth-sorted arrows is 100 000 runs of one piece each, interleaved with
@@ -14,11 +14,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use skia_safe::gradient::{Colors as GradientColors, Gradient, Interpolation};
 use skia_safe::paint::{Cap, Join, Style};
-use skia_safe::vertices::{VertexMode, Vertices};
-use skia_safe::{
-    BlendMode, Canvas, Color, Color4f, FilterMode, Image, MipmapMode, Paint, PathBuilder, Point,
-    Rect, SamplingOptions, TileMode,
-};
+use skia_safe::{gpu, Canvas, Color4f, Paint, PathBuilder, Point, TileMode};
+
+use crate::meshes::{Frame, Mesh};
 
 /// One paint of an object: stroke width (None fills), join, cap, colour stops
 /// `(offset, r, g, b, a)` and, for a gradient, its line `(x0, y0, x1, y1)`.
@@ -34,37 +32,10 @@ pub type PaintSpec = (
 /// `(start, end, closed)` into the points, and its paints in drawing order.
 pub type ObjectSpec<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, Vec<PaintSpec>);
 
-/// One textured mesh: texture key, RGBA pixels with their width and height,
-/// float32 positions `(n, 2)`, texture coordinates `(n, 2)` and colours
-/// `(n, 4)` with `per_triangle` rows per depth piece, its opacity, and the
-/// colour that clears what lies under its pieces (see `Mesh::draw`).
-pub type MeshSpec<'py> = (
-    u64,
-    Bound<'py, PyAny>,
-    u32,
-    u32,
-    Bound<'py, PyAny>,
-    Bound<'py, PyAny>,
-    Bound<'py, PyAny>,
-    usize,
-    f32,
-    Option<(f32, f32, f32, f32)>,
-);
-
 pub struct Object {
     points: Vec<Point>,
     subpaths: Vec<(usize, usize, bool)>,
     paints: Vec<Paint>,
-}
-
-pub struct Mesh {
-    paint: Paint,
-    positions: Vec<Point>,
-    uvs: Vec<Point>,
-    colors: Vec<Color>,
-    per_triangle: usize,
-    alpha: f32,
-    occlude: Option<Color>,
 }
 
 pub fn int_rows(array: &Bound<PyAny>, width: usize, name: &str) -> PyResult<Vec<i64>> {
@@ -196,73 +167,12 @@ pub fn add_subpath(
     }
 }
 
-fn f32_points(array: &Bound<PyAny>, width: usize, name: &str) -> PyResult<Vec<f32>> {
-    let buffer = PyBuffer::<f32>::get(array)
-        .map_err(|error| PyValueError::new_err(format!("{name}: {error}")))?;
-    let shape = buffer.shape();
-    if shape.len() != 2 || shape[1] != width {
-        return Err(PyValueError::new_err(format!(
-            "{name} must have {width} float32 columns"
-        )));
-    }
-    buffer
-        .to_vec(array.py())
-        .map_err(|error| PyValueError::new_err(format!("{name}: {error}")))
-}
-
 /// Read a VMobject from Python.
 pub fn object((points_array, subpaths_array, paints): ObjectSpec) -> PyResult<Object> {
     Ok(Object {
         points: points(&points_array)?,
         subpaths: subpath_table(&subpaths_array)?,
         paints: paints.into_iter().filter_map(paint).collect(),
-    })
-}
-
-/// Read a mesh from Python; `texture` is its image, from the texture cache.
-pub fn mesh(spec: &MeshSpec, texture: &Image) -> PyResult<Mesh> {
-    let (_, _, _, _, positions, uvs, colors, per_triangle, alpha, occlude) = spec;
-    let positions = f32_points(positions, 2, "mesh positions")?;
-    let uvs = f32_points(uvs, 2, "mesh uvs")?;
-    let colors = f32_points(colors, 4, "mesh colors")?;
-    let count = positions.len() / 2;
-    if uvs.len() != count * 2 || colors.len() != count * 4 || *per_triangle == 0 {
-        return Err(PyValueError::new_err(
-            "a mesh needs matching positions, uvs and colors",
-        ));
-    }
-    if count % *per_triangle != 0 || *per_triangle % 3 != 0 {
-        return Err(PyValueError::new_err(
-            "mesh pieces must hold whole triangles",
-        ));
-    }
-    let shader = texture
-        .to_shader(
-            Some((TileMode::Clamp, TileMode::Clamp)),
-            SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
-            None,
-        )
-        .ok_or_else(|| PyValueError::new_err("mesh texture shader failed"))?;
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_shader(shader);
-    Ok(Mesh {
-        paint,
-        positions: positions
-            .chunks_exact(2)
-            .map(|p| Point::new(p[0], p[1]))
-            .collect(),
-        uvs: uvs
-            .chunks_exact(2)
-            .map(|p| Point::new(p[0], p[1]))
-            .collect(),
-        colors: colors
-            .chunks_exact(4)
-            .map(|c| Color4f::new(c[0], c[1], c[2], c[3]).to_color())
-            .collect(),
-        per_triangle: *per_triangle,
-        alpha: *alpha,
-        occlude: occlude.map(|(r, g, b, a)| Color4f::new(r, g, b, a).to_color()),
     })
 }
 
@@ -294,57 +204,6 @@ impl Object {
     }
 }
 
-impl Mesh {
-    /// Draw all triangles, or the listed pieces, blended over each other in
-    /// one layer drawn with the mesh's opacity.  Depth pieces of a
-    /// translucent mesh first clear what lies under them to `occlude`, as a
-    /// depth buffer would hide it.
-    fn draw(&self, canvas: &Canvas, pieces: Option<&[i64]>) {
-        let selected;
-        let (positions, uvs, colors): (&[Point], &[Point], &[Color]) = match pieces {
-            None => (&self.positions, &self.uvs, &self.colors),
-            Some(pieces) => {
-                let per = self.per_triangle;
-                let rows: Vec<usize> = pieces
-                    .iter()
-                    .map(|&piece| piece as usize * per)
-                    .filter(|&first| first + per <= self.positions.len())
-                    .flat_map(|first| first..first + per)
-                    .collect();
-                selected = (
-                    rows.iter().map(|&i| self.positions[i]).collect::<Vec<_>>(),
-                    rows.iter().map(|&i| self.uvs[i]).collect::<Vec<_>>(),
-                    rows.iter().map(|&i| self.colors[i]).collect::<Vec<_>>(),
-                );
-                (&selected.0, &selected.1, &selected.2)
-            }
-        };
-        if positions.is_empty() {
-            return;
-        }
-        let vertices = Vertices::new_copy(VertexMode::Triangles, positions, uvs, colors, None);
-        if let (Some(color), Some(_)) = (self.occlude, pieces) {
-            if self.alpha < 1.0 {
-                let mut clear = Paint::default();
-                clear.set_shader(skia_safe::shaders::color(color));
-                clear.set_blend_mode(BlendMode::Src);
-                canvas.draw_vertices(&vertices, BlendMode::Src, &clear);
-            }
-        }
-        let layered = self.alpha < 1.0;
-        if layered {
-            canvas.save_layer_alpha(
-                None::<Rect>,
-                (self.alpha.clamp(0.0, 1.0) * 255.0).round() as u32,
-            );
-        }
-        canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
-        if layered {
-            canvas.restore();
-        }
-    }
-}
-
 /// Run kinds in the first column of `runs`.
 const VMOBJECT: i64 = 0;
 const MESH: i64 = 1;
@@ -354,8 +213,10 @@ const MESH: i64 = 1;
 /// into its subpaths or triangles), or all of it when `start == end`.
 pub fn draw(
     canvas: &Canvas,
+    context: &mut gpu::DirectContext,
     objects: &[Object],
     meshes: &[Mesh],
+    frame: &Frame,
     runs: &Bound<PyAny>,
     parts: &Bound<PyAny>,
 ) -> PyResult<()> {
@@ -374,7 +235,10 @@ pub fn draw(
                 .get(index)
                 .ok_or_else(missing)?
                 .draw(canvas, pieces, &mut path),
-            MESH => meshes.get(index).ok_or_else(missing)?.draw(canvas, pieces),
+            MESH => meshes
+                .get(index)
+                .ok_or_else(missing)?
+                .draw(canvas, context, frame, pieces)?,
             _ => return Err(PyValueError::new_err(format!("unknown run kind {kind}"))),
         }
     }

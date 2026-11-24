@@ -51,11 +51,21 @@ Python-to-native call per frame, not one per arrow.
 
 :class:`.MeshSurface` draws a :class:`.Surface` as one smoothly lit triangle
 mesh and :class:`.TexturedSurface` stretches an image over it, optionally with
-a second image on the side facing away from the light.  Their triangles take
-part in the same depth ordering; a translucent mesh surface hides depth-tested
-mobjects behind it, as a depth buffer would.  Unlike ManimGL, this does not
-depend on the order mobjects were added: ManimGL hides only what is drawn
-after the surface.
+a second image on the side facing away from the light.  Their shading is
+ManimGL's: an untextured surface is lit per vertex and a textured one per
+pixel, with the day and night images mixed across the terminator.
+
+Mesh surfaces get exact depth from a Vulkan depth buffer: each frame, a small
+Vulkan render pass draws the opaque mesh surfaces with a depth test, and
+every mesh pixel behind the nearest opaque one is discarded.  Opaque surfaces
+therefore hide each other per pixel, however close (an Earth 0.1% outside a
+translucent sphere) or intersecting they are.  Vector mobjects are drawn by
+Skia and take part through the depth ordering above, not the depth buffer.
+
+A translucent mesh surface hides depth-tested mobjects behind it, as a depth
+buffer would, and shows the camera background through itself, except where
+an opaque mesh surface lies behind it: that surface shows through.  Unlike
+ManimGL, this does not depend on the order mobjects were added.
 
 Custom shaders
 --------------

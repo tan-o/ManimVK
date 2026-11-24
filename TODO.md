@@ -10,7 +10,7 @@
 
 - [ ] **把两张地球贴图放进 `example_scenes/hairy_ball/`**（脚本已入库）。`EarthTextureMap` / `NightEarthTextureMap` 在用户本机。
 - [ ] **跑 `HairyEarth` 的 1080p90 正式片**，并记录每段动画的 it/s。
-- [ ] **确认半透明球遮挡语义**。`PairsOfNullPoints` 中球内坐标轴会被整段挡掉；ManimGL 只挡后加入场景的对象。
+- [ ] **半透明球遮挡语义**：半透明网格挡住它后面的深度测试矢量（不论加入顺序），但不挡不透明网格；ManimGL 只挡后加入场景的对象。
 - [ ] **实现交互预览**（swapchain + 输入事件）。目前只有离线渲染；需要在有 GPU 的机器上开发和验收。
 - [ ] **`TexTemplateFromCLI`**：示例要求命令行传 `--tex_template`，场景渲染工具还不支持按场景传参（`tools/scenes/known_errors.json` 里唯一的已知错误）。
 

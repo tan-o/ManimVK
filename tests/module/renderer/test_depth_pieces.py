@@ -89,34 +89,28 @@ def test_mesh_surface_follows_the_transformed_surface():
     assert mesh.get_depth_pieces().shape == (64, 3, 3)
 
 
-def test_mesh_layers_blend_base_highlight_and_shadow():
-    mesh = MeshSurface(Sphere(resolution=(6, 3)), shading=(0.3, 0.2, 0.4))
-    positions, uvs, colors = mesh.get_shaded_mesh(ThreeDCamera(), np.array([0, 5]))
-    # Two triangles, three layers each, three vertices per layer.
-    assert positions.shape == (18, 3)
-    assert uvs.shape == (18, 2)
-    assert colors.shape == (18, 4)
-    assert np.all(colors[:3, 3] == 1)  # the base colour is opaque
-    np.testing.assert_allclose(colors[:3, :3], np.tile(mesh.color.to_rgb(), (3, 1)))
-    unshaded = MeshSurface(Sphere(resolution=(6, 3)), shading=(0, 0, 0))
-    assert unshaded.get_shaded_mesh(ThreeDCamera())[0].shape == (2 * 6 * 3 * 3, 3)
+def test_mesh_normals_point_outward_along_du_cross_dv():
+    sphere = MeshSurface(Sphere(radius=2, resolution=(12, 6)))
+    normals = sphere.get_vertex_normals()
+    np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1, atol=1e-9)
+    # On a sphere about the origin, du x dv points away from the centre.
+    outward = np.einsum("ij,ij->i", normals, sphere.points / 2)
+    assert np.all(outward > 0.9)
 
 
-def test_textured_surface_atlas_holds_day_night_and_white(tmp_path):
+def test_textured_surface_images_are_read_once(tmp_path):
     day = tmp_path / "day.png"
     night = tmp_path / "night.png"
     Image.new("RGB", (8, 4), (10, 200, 30)).save(day)
     Image.new("RGB", (16, 8), (5, 5, 50)).save(night)
     earth = TexturedSurface(Sphere(resolution=(6, 3)), day, night)
-    atlas, key = earth.get_texture_atlas()
-    assert key == earth.get_texture_atlas()[1]
-    assert not atlas.flags.writeable
-    assert atlas.shape[1] == 8
-    assert tuple(atlas[0, 0]) == (10, 200, 30, 255)
-    assert tuple(atlas[-1, 0]) == (255, 255, 255, 255)
-    _, uvs, colors = earth.get_shaded_mesh(ThreeDCamera())
-    # Night, day, highlight and shadow layers.
-    assert len(uvs) == 2 * 6 * 3 * 3 * 4
+    (day_pixels, day_key), (night_pixels, night_key) = earth.get_images()
+    assert earth.get_images()[0][1] == day_key != night_key
+    assert not day_pixels.flags.writeable
+    assert day_pixels.shape == (4, 8, 4)
+    assert night_pixels.shape == (8, 16, 4)
+    assert tuple(day_pixels[0, 0]) == (10, 200, 30, 255)
+    assert MeshSurface(Sphere(resolution=(6, 3))).get_images() == []
     earth.fade(1)
     assert earth.get_opacity() == 0
 
@@ -143,15 +137,15 @@ class _Target:
                 whole = len(objects[index][1])
                 self.calls["subpaths"] += end - start if end > start else whole
                 continue
-            _, _, _, _, positions, uvs, colors, per, alpha, occlude = meshes[index]
-            assert positions.dtype == np.float32
-            assert positions.shape[1] == 2
-            assert len(positions) == len(uvs) == len(colors)
+            (xy, points, normals, uvs, depth, triangles), _, _, style = meshes[index]
+            assert xy.dtype == points.dtype == normals.dtype == np.float32
+            assert len(xy) == len(points) == len(normals) == len(uvs) == len(depth)
+            assert triangles.dtype == np.int32
             self.calls["mesh_runs"] += 1
-            self.calls["mesh_vertices"] += (
-                (end - start) * per if end > start else len(positions)
+            self.calls["mesh_triangles"] += (
+                end - start if end > start else len(triangles)
             )
-            if occlude is not None and end > start:
+            if style[2] is not None and end > start:
                 self.calls["occlude"] += 1
 
     def restore_static_layer(self):
@@ -201,7 +195,7 @@ def test_hairs_and_mesh_draw_in_few_runs(calls, tmp_path):
         _HairyBall().render()
     # Every hair and every triangle is drawn once ...
     assert calls["subpaths"] == 3000
-    assert calls["mesh_vertices"] == 2 * 12 * 6 * 3 * 3
+    assert calls["mesh_triangles"] == 2 * 12 * 6
     # ... in a few dozen runs, not one per piece, all in one call per frame.
     assert calls["draw_display_list"] == 1
     assert calls["vmobject_runs"] <= ThreeDCamera.depth_slices

@@ -1,0 +1,139 @@
+"""Mesh surfaces hide each other per pixel, as a depth buffer would.
+
+The frames are checked against ray casting: for every pixel, the ray from
+the camera through it is intersected with the exact spheres, and the nearest
+one says which colour the pixel must show.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+pytest.importorskip("manim_vk")
+
+from manim import (  # noqa: E402
+    BLUE,
+    DEGREES,
+    OUT,
+    RED,
+    MeshSurface,
+    Sphere,
+    tempconfig,
+)
+from manim.camera import ThreeDCamera  # noqa: E402
+from manim.renderer.skia.renderer import SkiaRenderer  # noqa: E402
+
+WIDTH, HEIGHT = 480, 270
+
+
+def _render(camera, mobjects):
+    with tempconfig({"pixel_width": WIDTH, "pixel_height": HEIGHT}):
+        renderer = SkiaRenderer(camera=camera)
+        try:
+            renderer.render_mobjects(mobjects)
+            return renderer.get_frame().astype(np.float64) / 255
+        finally:
+            renderer.close()
+
+
+def _flat_sphere(center, radius, color, opacity=1.0, rotation=0.0):
+    sphere = MeshSurface(
+        Sphere(radius=radius, resolution=(96, 48)),
+        color=color,
+        opacity=opacity,
+        shading=(0, 0, 0),
+    )
+    sphere.rotate(rotation, OUT, about_point=np.zeros(3))
+    return sphere.shift(center)
+
+
+def _cast(camera, spheres):
+    """Per pixel: the index of the nearest sphere hit (-1 for none) and the
+    pixels to leave out, where polygons and spheres may disagree.
+    """
+    with tempconfig({"pixel_width": WIDTH, "pixel_height": HEIGHT}):
+        frame_width, frame_height = camera.frame_width, camera.frame_height
+    rotation = camera.get_rotation_matrix()
+    focal, zoom = camera.get_focal_distance(), camera.get_zoom()
+    center = np.asarray(camera.frame_center, dtype=float)
+    xs = ((np.arange(WIDTH) + 0.5) / WIDTH - 0.5) * frame_width
+    ys = (0.5 - (np.arange(HEIGHT) + 0.5) / HEIGHT) * frame_height
+    screen_x, screen_y = np.meshgrid(xs, ys)
+    # In the camera's rotated frame the eye is at (0, 0, focal) and the ray
+    # through screen point (X, Y) meets z = 0 at (X, Y) / zoom.
+    directions = np.stack(
+        [screen_x / zoom, screen_y / zoom, -focal * np.ones_like(screen_x)], axis=-1
+    )
+    eye = np.array([0.0, 0.0, focal])
+    hits = []
+    for sphere_center, radius in spheres:
+        c = rotation @ (np.asarray(sphere_center, dtype=float) - center)
+        oc = eye - c
+        a = np.sum(directions**2, axis=-1)
+        b = 2 * np.sum(directions * oc, axis=-1)
+        disc = b**2 - 4 * a * (oc @ oc - radius**2)
+        t = np.where(disc >= 0, (-b - np.sqrt(np.maximum(disc, 0))) / (2 * a), np.inf)
+        # Close to the silhouette the polygon and the sphere differ: leave
+        # out rays passing within 3% of the radius of it.
+        miss = np.linalg.norm(np.cross(oc, directions), axis=-1) / np.sqrt(a)
+        edge = np.abs(miss - radius) < 0.03 * radius
+        hits.append((t, edge))
+    ts = np.stack([t for t, _ in hits])
+    order = np.sort(ts, axis=0)
+    nearest = np.where(np.isfinite(order[0]), np.argmin(ts, axis=0), -1)
+    # The distance between the nearest two surfaces along the ray, in scene
+    # units: where it is tiny, the polygons may disagree with the spheres.
+    length = np.linalg.norm(directions, axis=-1)
+    gap = (
+        (order[1] - order[0]) * length
+        if len(ts) > 1
+        else np.full(nearest.shape, np.inf)
+    )
+    ambiguous = np.any(np.stack([edge for _, edge in hits]), axis=0) | (gap < 0.02)
+    return nearest, ambiguous
+
+
+def _camera():
+    return ThreeDCamera(phi=30 * DEGREES, theta=-80 * DEGREES)
+
+
+def test_intersecting_opaque_spheres_hide_each_other_per_pixel():
+    camera = _camera()
+    spheres = [((-1.0, 0, 0), 2.2, RED), ((1.2, 0.3, 0), 2.0, BLUE)]
+    frame = _render(camera, [_flat_sphere(c, r, color) for c, r, color in spheres])
+    nearest, ambiguous = _cast(camera, [(c, r) for c, r, _ in spheres])
+    red = (frame[..., 0] > 0.5) & (frame[..., 2] < 0.5)
+    blue = (frame[..., 2] > 0.5) & (frame[..., 0] < 0.5)
+    shown = np.where(red, 0, np.where(blue, 1, -1))
+    wrong = (shown != nearest) & ~ambiguous
+    # Away from silhouettes and from where the spheres are nearly as far, the
+    # 96 x 48 polygons and the spheres agree; ordering triangles instead of
+    # testing depth gets dozens of pixels along the intersection wrong.
+    assert wrong.sum() <= 10, f"{wrong.sum()} pixels show the wrong sphere"
+    assert (~ambiguous & (nearest == 0)).sum() > 3000
+    assert (~ambiguous & (nearest == 1)).sum() > 3000
+
+
+def test_translucent_surface_inside_an_opaque_one_is_hidden():
+    # The Earth over a translucent sphere: 0.1% apart, triangles not aligned.
+    camera = _camera()
+    outer = _flat_sphere((0, 0, 0), 3.003, RED, rotation=-90 * DEGREES)
+    inner = _flat_sphere((0, 0, 0), 3.0, BLUE, opacity=0.3)
+    alone = _render(
+        camera, [_flat_sphere((0, 0, 0), 3.003, RED, rotation=-90 * DEGREES)]
+    )
+    both = _render(camera, [inner, outer])
+    np.testing.assert_array_equal(both, alone)
+
+
+def test_opaque_surface_inside_a_translucent_one_is_drawn_through_it():
+    camera = _camera()
+    outer = _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.5)
+    inner = _flat_sphere((0, 0, 0), 1.0, RED)
+    frame = _render(camera, [inner, outer])
+    nearest, ambiguous = _cast(camera, [((0, 0, 0), 1.0)])
+    inside = (nearest == 0) & ~ambiguous
+    # Red under half-transparent blue, never the background.
+    assert np.all(frame[inside, 0] > 0.3)
+    assert np.all(frame[inside, 2] > 0.3)
