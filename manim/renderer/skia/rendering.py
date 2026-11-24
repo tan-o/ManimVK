@@ -242,7 +242,7 @@ class SkiaDrawingContext:
         return cached[1]
 
     def _vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
-        """``(points, subpaths, paints)`` for :meth:`draw_vmobjects`.
+        """``(points, subpaths, paints)`` for :meth:`draw_display_list`.
 
         Depth pieces index the subpaths split on the 3D points
         (:meth:`_subpath_table`); a whole VMobject uses manim_core's split.
@@ -255,9 +255,6 @@ class SkiaDrawingContext:
         for kind in ("background_stroke", "fill", "stroke"):
             if kind == "fill":
                 rgbas = self.camera.get_fill_rgbas(vmobject)
-                if not np.any(rgbas[:, 3]):
-                    # A transparent fill draws nothing; skip tessellating the path.
-                    continue
                 width = None
             else:
                 background = kind == "background_stroke"
@@ -266,6 +263,9 @@ class SkiaDrawingContext:
                     continue
                 rgbas = self.camera.get_stroke_rgbas(vmobject, background=background)
                 width = float(width * self.target.settings.line_width_multiple)
+            if not rgbas[:, 3].any():
+                # A transparent paint draws nothing; skip tessellating the path.
+                continue
             line = None
             if len(rgbas) > 1:
                 if gradient is None:
@@ -279,13 +279,11 @@ class SkiaDrawingContext:
                         float(ends[1][1]),
                     )
                 line = gradient
-            # Manim stores straight RGBA, as Skia's colours take it.
-            stops = [
-                (float(offset), float(r), float(g), float(b), float(a))
-                for (r, g, b, a), offset in zip(
-                    rgbas, np.linspace(0, 1, len(rgbas)), strict=True
-                )
-            ]
+            # Manim stores straight RGBA, as Skia's colours take it; the
+            # stops are evenly spaced.
+            rows = rgbas.tolist()
+            last = max(len(rows) - 1, 1)
+            stops = [(i / last, *row) for i, row in enumerate(rows)]
             paints.append(
                 (
                     width,
