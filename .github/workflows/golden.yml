@@ -1,0 +1,135 @@
+name: Golden (Cairo vs Vulkan)
+
+# Renders every example scene with both renderers and compares the frames
+# (tools/golden).  GitHub's runners have no GPU: Mesa's lavapipe provides
+# Vulkan in software, so the real Skia Ganesh Vulkan path runs, only slower.
+# The report is uploaded as an artifact and summarised on the run page.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Regex on scene ids (empty renders all)"
+        required: false
+        default: ""
+  push:
+    branches:
+      - rust-core-preview
+
+concurrency:
+  group: golden-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      PYTHONIOENCODING: "utf8"
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      ONLY: ${{ github.event.inputs.only }}
+
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v7
+
+      - name: Use crates.io directly
+        # .cargo/config.toml points at a mirror for local builds in China.
+        run: rm -f .cargo/config.toml
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native/manim_core
+            native/manim_vk
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango1.0-dev libcairo2-dev pkg-config \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools \
+            clang ninja-build fonts-dejavu-core
+
+      - name: Install TeX Live
+        uses: zauguin/install-texlive@v4
+        with:
+          packages: >
+            scheme-basic latex fontspec tipa calligra xcolor
+            standalone preview doublestroke setspace rsfs relsize
+            ragged2e fundus-calligra microtype wasysym physics dvisvgm jknapltx
+            wasy cm-super babel-english gnu-freefont mathastext cbfonts-fd xetex
+
+      - name: Show the Vulkan device
+        run: vulkaninfo --summary
+
+      - name: Install manim and the native modules
+        run: |
+          uv pip install --system -e . pytest
+          uv pip install --system ./native/manim_core ./native/manim_vk
+          python -c "import manim_vk, manim_core; print('native modules import')"
+
+      - name: Run the module tests
+        continue-on-error: true
+        run: python -m pytest tests/module -q -o addopts="" -p no:cacheprovider
+
+      - name: Render a movie with Vulkan
+        # Golden compares PNG frames; this covers the video path (GPU YUV
+        # readback and the encoder).
+        run: |
+          manim render -ql --renderer vulkan --media_dir media example_scenes/basic.py SquareToCircle
+          python - <<'EOF'
+          import glob, av
+          path = glob.glob("media/videos/**/SquareToCircle.mp4", recursive=True)[0]
+          container = av.open(path)
+          stream = container.streams.video[0]
+          frames = sum(1 for _ in container.decode(video=0))
+          context = stream.codec_context
+          print(path, frames, "frames, colour tags",
+                context.colorspace, context.color_primaries, context.color_trc, context.color_range)
+          assert frames > 0
+          EOF
+
+      - name: Collect scenes
+        run: python tools/golden/collect.py --out golden
+
+      - name: Render with Cairo
+        run: |
+          python tools/golden/render.py --scenes golden --out golden --renderer cairo --jobs 4 \
+            ${ONLY:+--only "$ONLY"}
+
+      - name: Render with Vulkan
+        run: |
+          python tools/golden/render.py --scenes golden --out golden --renderer vulkan --jobs 2 \
+            ${ONLY:+--only "$ONLY"}
+
+      - name: Compare
+        run: |
+          python tools/golden/compare.py --reference golden/cairo --candidate golden/vulkan --out golden/report
+          {
+            echo "## Golden: Cairo vs Vulkan (lavapipe)"
+            grep -v "| PASS |" golden/report/report.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-report
+          path: |
+            golden/report
+            golden/*/**/status.json
+            media/videos
+          if-no-files-found: warn
