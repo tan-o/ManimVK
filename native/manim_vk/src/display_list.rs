@@ -3,20 +3,24 @@
 //! Python sends each VMobject once per frame, as its projected points, its
 //! subpaths and its paints (background stroke, fill, stroke), and each mesh
 //! once (see `meshes`); then a list of runs in drawing order.  A
-//! run draws one object: all of it, or the depth pieces listed for it
-//! (subpaths of a VMobject, triangles of a mesh).  A field of 50 000
-//! depth-sorted arrows is 100 000 runs of one piece each, interleaved with
-//! slices of a translucent sphere; drawing them here costs one call from
-//! Python instead of one per run.
+//! run draws one object: a mesh, all of a VMobject, or the depth pieces
+//! listed for it (its curves or subpaths).  A depth-tested run carries the
+//! depth key of its nearest piece and is clipped per pixel to where no mesh
+//! is nearer, as a depth buffer would hide it.  A field of 50 000
+//! depth-sorted arrows is a few hundred runs, one per depth slice and path;
+//! drawing them here costs one call from Python instead of one per run.
 
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use skia_safe::gradient::{Colors as GradientColors, Gradient, Interpolation};
 use skia_safe::paint::{Cap, Join, Style};
-use skia_safe::{gpu, Canvas, Color4f, Paint, PathBuilder, Point, TileMode};
+use skia_safe::runtime_effect::ChildPtr;
+use skia_safe::{
+    gpu, Canvas, ClipOp, Color4f, Data, Paint, PathBuilder, Point, RuntimeEffect, TileMode,
+};
 
-use crate::meshes::{Frame, Mesh};
+use crate::meshes::{normalised_key, Frame, Mesh};
 
 /// One paint of an object: stroke width (None fills), join, cap, colour stops
 /// `(offset, r, g, b, a)` and, for a gradient, its line `(x0, y0, x1, y1)`.
@@ -28,13 +32,20 @@ pub type PaintSpec = (
     Option<(f32, f32, f32, f32)>,
 );
 
-/// One VMobject: points `(n, 2+)` float64, subpaths `(k, 3)` int64 of
-/// `(start, end, closed)` into the points, and its paints in drawing order.
+/// One VMobject: points `(n, 2+)` float64, rows `(k, 3)` int64 of
+/// `(start, end, flags)` into the points, and its paints in drawing order.
+/// Drawn whole, every row is a subpath, closed with flag [`CLOSED`]; drawn
+/// in depth pieces, a row is a piece (see `Object::draw`).
 pub type ObjectSpec<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, Vec<PaintSpec>);
+
+/// Row flags: the subpath is closed, the row starts it, the row ends it.
+const CLOSED: i64 = 1;
+const FIRST: i64 = 2;
+const LAST: i64 = 4;
 
 pub struct Object {
     points: Vec<Point>,
-    subpaths: Vec<(usize, usize, bool)>,
+    rows: Vec<(usize, usize, i64)>,
     paints: Vec<Paint>,
 }
 
@@ -169,61 +180,188 @@ pub fn add_subpath(
 
 /// Read a VMobject from Python.
 pub fn object((points_array, subpaths_array, paints): ObjectSpec) -> PyResult<Object> {
+    let rows = int_rows(&subpaths_array, 3, "subpaths")?
+        .chunks_exact(3)
+        .map(|row| (row[0] as usize, row[1] as usize, row[2]))
+        .collect();
     Ok(Object {
         points: points(&points_array)?,
-        subpaths: subpath_table(&subpaths_array)?,
+        rows,
         paints: paints.into_iter().filter_map(paint).collect(),
     })
 }
 
+/// Side of the screen tiles the depth pieces of a run are drawn in, in
+/// device pixels.
+///
+/// Ganesh draws an anti-aliased path on the GPU only while it is small: in
+/// its path atlas, up to 256 x 256 pixels of bounds (or, if it has at most
+/// 16 384 verbs, triangulated).  A larger path is rasterised on the CPU into
+/// a mask texture the size of its bounds and the mask is cached.  The pieces
+/// of a depth slice spread over the whole frame, so they are drawn as one
+/// path per tile, which leaves up to 64 pixels for pieces reaching out of
+/// their tile on each side.
+const TILE: f32 = 128.0;
+
+/// Contiguous pieces of one subpath, drawn as one: their range of points,
+/// whether the chain closes its subpath, and its bounds in device pixels.
+struct Chain {
+    start: usize,
+    end: usize,
+    closed: bool,
+    low: [f32; 2],
+    high: [f32; 2],
+}
+
 impl Object {
-    /// Draw all subpaths, or the listed ones; `path` is reused across runs.
-    fn draw(&self, canvas: &Canvas, pieces: Option<&[i64]>, path: &mut PathBuilder) {
+    /// Draw all subpaths, or the listed pieces; `path` is reused across
+    /// draws, `to_device` maps the points to device pixels.
+    ///
+    /// Pieces are joined in index order: a piece that starts where the
+    /// previous one ended, in the same subpath, continues it, so the curves
+    /// of a stroke drawn together keep their joins; a subpath drawn from its
+    /// first piece to its last is closed if it is closed.  The chains are
+    /// drawn one path per screen tile (see [`TILE`]).
+    fn draw(
+        &self,
+        canvas: &Canvas,
+        pieces: Option<&[i64]>,
+        to_device: [f32; 4],
+        path: &mut PathBuilder,
+    ) {
         if self.paints.is_empty() {
             return;
         }
         path.reset();
-        match pieces {
-            None => {
-                for &(first, last, closed) in &self.subpaths {
-                    add_subpath(path, &self.points, first, last, closed);
-                }
+        let Some(pieces) = pieces else {
+            for &(first, last, flags) in &self.rows {
+                add_subpath(path, &self.points, first, last, flags & CLOSED != 0);
             }
-            Some(pieces) => {
-                for &piece in pieces {
-                    if let Some(&(first, last, closed)) = self.subpaths.get(piece as usize) {
-                        add_subpath(path, &self.points, first, last, closed);
-                    }
-                }
+            self.draw_path(canvas, path);
+            return;
+        };
+        let mut tiled: Vec<((i32, i32), Chain)> = self
+            .chains(pieces, to_device)
+            .into_iter()
+            .map(|chain| {
+                let x = 0.5 * (chain.low[0] + chain.high[0]);
+                let y = 0.5 * (chain.low[1] + chain.high[1]);
+                (((x / TILE).floor() as i32, (y / TILE).floor() as i32), chain)
+            })
+            .collect();
+        // Stable: in a tile, chains keep their order.
+        tiled.sort_by_key(|(tile, _)| *tile);
+        for group in tiled.chunk_by(|a, b| a.0 == b.0) {
+            path.reset();
+            for (_, chain) in group {
+                add_subpath(path, &self.points, chain.start, chain.end, chain.closed);
             }
+            self.draw_path(canvas, path);
         }
+    }
+
+    fn draw_path(&self, canvas: &Canvas, path: &mut PathBuilder) {
         let path = path.snapshot();
         for paint in &self.paints {
             canvas.draw_path(&path, paint);
         }
     }
+
+    /// The listed pieces joined into chains (see [`Object::draw`]).
+    fn chains(&self, pieces: &[i64], to_device: [f32; 4]) -> Vec<Chain> {
+        let mut order: Vec<usize> = pieces
+            .iter()
+            .filter_map(|&piece| usize::try_from(piece).ok())
+            .filter(|&piece| piece < self.rows.len())
+            .collect();
+        order.sort_unstable();
+        order.dedup();
+        let mut chains: Vec<Chain> = Vec::new();
+        // Whether the open chain began its subpath, and the flags of its
+        // last piece.
+        let mut began = false;
+        let mut last_flags = 0;
+        for piece in order {
+            let (start, end, flags) = self.rows[piece];
+            if end > self.points.len() || end < start + 4 {
+                continue;
+            }
+            let continues = flags & FIRST == 0
+                && chains.last().is_some_and(|chain| chain.end == start && !chain.closed);
+            if !continues {
+                if let Some(chain) = chains.last_mut() {
+                    chain.closed = began && last_flags & LAST != 0 && last_flags & CLOSED != 0;
+                }
+                began = flags & FIRST != 0;
+                chains.push(Chain {
+                    start,
+                    end: start,
+                    closed: false,
+                    low: [f32::INFINITY; 2],
+                    high: [f32::NEG_INFINITY; 2],
+                });
+            }
+            let chain = chains.last_mut().expect("pushed above");
+            chain.end = end;
+            for point in &self.points[start..end] {
+                let x = point.x * to_device[0] + to_device[2];
+                let y = point.y * to_device[1] + to_device[3];
+                chain.low = [chain.low[0].min(x), chain.low[1].min(y)];
+                chain.high = [chain.high[0].max(x), chain.high[1].max(y)];
+            }
+            last_flags = flags;
+        }
+        if let Some(chain) = chains.last_mut() {
+            chain.closed = began && last_flags & LAST != 0 && last_flags & CLOSED != 0;
+        }
+        chains
+    }
 }
+
+/// The per-pixel depth test of a VMobject run, as a clip: coverage 1 where
+/// the run's key is not behind the nearest mesh of the depth image (or no
+/// mesh is there), 0 elsewhere.  The slack, 1/1024 of the frame's depth
+/// range, keeps a stroke lying on a surface, as ManimGL's mesh lines are,
+/// against the curvature between the surface's vertices.
+pub const DEPTH_CLIP_SKSL: &str = r"
+uniform shader depthImage;
+uniform float key;
+half4 main(float2 p) {
+    float3 bytes = floor(depthImage.eval(p).rgb * 255.0 + 0.5);
+    float nearest = dot(bytes, float3(65536.0, 256.0, 1.0)) / 16777215.0;
+    return half4(key >= nearest - 1.0 / 1024.0 ? 1.0 : 0.0);
+}
+";
 
 /// Run kinds in the first column of `runs`.
 const VMOBJECT: i64 = 0;
 const MESH: i64 = 1;
 
 /// Draw `runs`, `(m, 4)` int64 rows of `(kind, object, start, end)`: the
-/// VMobject or mesh `object` with the pieces `parts[start..end]` (indices
-/// into its subpaths or triangles), or all of it when `start == end`.
+/// mesh `object`, or the VMobject `object` with the pieces
+/// `parts[start..end]` (indices into its rows), or all of it when
+/// `start == end`.  `keys` holds the depth key of each run, NaN for a run
+/// drawn without the depth test; `clip` is the compiled
+/// [`DEPTH_CLIP_SKSL`].
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     canvas: &Canvas,
     context: &mut gpu::DirectContext,
     objects: &[Object],
     meshes: &[Mesh],
     frame: &Frame,
+    clip: &RuntimeEffect,
     runs: &Bound<PyAny>,
     parts: &Bound<PyAny>,
+    keys: &[f32],
 ) -> PyResult<()> {
     let runs = int_rows(runs, 4, "runs")?;
     let parts = int_rows(parts, 1, "parts")?;
+    if keys.len() * 4 != runs.len() {
+        return Err(PyValueError::new_err("one depth key per run is needed"));
+    }
     let mut path = PathBuilder::new();
-    for run in runs.chunks_exact(4) {
+    for (run, &key) in runs.chunks_exact(4).zip(keys) {
         let (kind, index, start, end) = (run[0], run[1] as usize, run[2] as usize, run[3] as usize);
         if end > parts.len() || start > end {
             return Err(PyValueError::new_err("run pieces are out of range"));
@@ -231,14 +369,39 @@ pub fn draw(
         let pieces = (start < end).then(|| &parts[start..end]);
         let missing = || PyValueError::new_err(format!("run names a missing object {index}"));
         match kind {
-            VMOBJECT => objects
-                .get(index)
-                .ok_or_else(missing)?
-                .draw(canvas, pieces, &mut path),
+            VMOBJECT => {
+                let object = objects.get(index).ok_or_else(missing)?;
+                let tested = match frame.key_range {
+                    Some(range) if frame.has_any && key.is_finite() => {
+                        Some(normalised_key(key, range))
+                    }
+                    _ => None,
+                };
+                match tested {
+                    None => object.draw(canvas, pieces, frame.to_device, &mut path),
+                    Some(key) => {
+                        let shader = clip
+                            .make_shader(
+                                Data::new_copy(&key.to_ne_bytes()),
+                                &[ChildPtr::from(frame.all_depth.clone())],
+                                None,
+                            )
+                            .ok_or_else(|| PyValueError::new_err("depth clip shader failed"))?;
+                        canvas.save();
+                        // The depth image is in device pixels.
+                        let matrix = canvas.local_to_device();
+                        canvas.reset_matrix();
+                        canvas.clip_shader(shader, ClipOp::Intersect);
+                        canvas.set_matrix(&matrix);
+                        object.draw(canvas, pieces, frame.to_device, &mut path);
+                        canvas.restore();
+                    }
+                }
+            }
             MESH => meshes
                 .get(index)
                 .ok_or_else(missing)?
-                .draw(canvas, context, frame, pieces)?,
+                .draw(canvas, context, frame)?,
             _ => return Err(PyValueError::new_err(format!("unknown run kind {kind}"))),
         }
     }

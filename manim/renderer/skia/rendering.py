@@ -88,6 +88,27 @@ def _slice(order: DrawOrder, start: int, end: int) -> DrawOrder:
         owner=order.owner[start:end],
         start=order.start[start:end],
         end=order.end[start:end],
+        key=order.key[start:end],
+    )
+
+
+def _meshes_first(
+    order: DrawOrder, kinds: np.ndarray, opaque: np.ndarray
+) -> DrawOrder:
+    """``order`` with the mesh surfaces' runs first, opaque before
+    translucent, and the other runs after them in their order.
+
+    In a 3D camera meshes take part in the depth buffer: what lies behind
+    them is hidden per pixel whenever it is drawn, and what lies in front
+    is drawn over them, so they come first.
+    """
+    rank = np.where(kinds == _MESH, np.where(opaque, 0, 1), 2)[order.owner]
+    runs = np.argsort(rank, kind="stable")
+    return order._replace(
+        owner=order.owner[runs],
+        start=order.start[runs],
+        end=order.end[runs],
+        key=order.key[runs],
     )
 
 
@@ -104,6 +125,7 @@ def _single(vmobject: VMobject, pieces: np.ndarray | None) -> DrawOrder:
         np.zeros(1, dtype=np.int64),
         np.array([len(parts)], dtype=np.int64),
         parts,
+        np.full(1, np.nan),
     )
 
 
@@ -135,7 +157,7 @@ class SkiaDrawingContext:
             for index, root in enumerate(mobjects)
             for member in root.get_family()
         }
-        self._subpath_tables: dict[int, tuple] = {}
+        self._piece_tables: dict[int, tuple] = {}
         self._specs: dict[tuple[int, bool], tuple] = {}
         self._meshes: dict[int, tuple] = {}
         with self.camera._drawing():
@@ -150,13 +172,23 @@ class SkiaDrawingContext:
             mobject_kinds = np.array(
                 [_kind(mobject) for mobject in order.mobjects], dtype=np.int64
             )
-            # Every opaque mesh of the frame takes part in the depth pass of
-            # each display list, whichever runs the list draws.
+            # Every mesh of the frame takes part in the depth pass of each
+            # display list, whichever runs the list draws.
             self._frame_meshes = [
                 mobject
                 for mobject, kind in zip(order.mobjects, mobject_kinds, strict=True)
                 if kind == _MESH
             ]
+            if self._frame_meshes and isinstance(self.camera, ThreeDCamera):
+                opaque = np.array(
+                    [
+                        kind == _MESH and mobject.get_opacity() >= 1
+                        for mobject, kind in zip(
+                            order.mobjects, mobject_kinds, strict=True
+                        )
+                    ]
+                )
+                order = _meshes_first(order, mobject_kinds, opaque)
             kinds = mobject_kinds[order.owner]
             # Consecutive runs of one kind of mobject are drawn together;
             # VMobjects and meshes share one display list.
@@ -201,8 +233,8 @@ class SkiaDrawingContext:
     ) -> None:
         """Draw runs of VMobjects and meshes in one native call: each mobject
         once (a VMobject's points, subpaths and paints; a mesh's vertices),
-        then the runs in order.  The frame's other meshes come last, for the
-        depth of the opaque ones.
+        then the runs in order, with the depth key of each run.  The frame's
+        other meshes come last, for the depth pass.
         """
         owners = order.owner[start:end]
         run_start, run_end = order.start[start:end], order.end[start:end]
@@ -232,7 +264,7 @@ class SkiaDrawingContext:
         meshes += [
             self._mesh_spec(mesh)
             for mesh in self._frame_meshes
-            if id(mesh) not in drawn and mesh.get_opacity() >= 1
+            if id(mesh) not in drawn
         ]
         runs = np.stack(
             [
@@ -245,7 +277,11 @@ class SkiaDrawingContext:
         ).astype(np.int64)
         context = self.target.get_context(self.camera)
         context.draw_display_list(
-            objects, meshes, runs, np.ascontiguousarray(order.parts, dtype=np.int64)
+            objects,
+            meshes,
+            runs,
+            np.ascontiguousarray(order.parts, dtype=np.int64),
+            np.ascontiguousarray(order.key[start:end], dtype=np.float32),
         )
 
     def _cached_vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
@@ -259,11 +295,11 @@ class SkiaDrawingContext:
     def _vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
         """``(points, subpaths, paints)`` for :meth:`draw_display_list`.
 
-        Depth pieces index the subpaths split on the 3D points
-        (:meth:`_subpath_table`); a whole VMobject uses manim_core's split.
+        Depth pieces index the rows of :meth:`_piece_table`; a whole
+        VMobject uses manim_core's split.
         """
         points, subpaths = (
-            self._subpath_table(vmobject) if pieced else self._whole_path(vmobject)
+            self._piece_table(vmobject) if pieced else self._whole_path(vmobject)
         )
         paints = []
         gradient = None
@@ -325,17 +361,20 @@ class SkiaDrawingContext:
     def _set_path(self, context, vmobject: VMobject) -> None:
         context.set_cubic_path(*self._whole_path(vmobject))
 
-    def _subpath_table(self, vmobject: VMobject) -> tuple[np.ndarray, np.ndarray]:
-        """Projected points and ``(start, end, closed)`` rows per subpath, once
-        per frame.
+    def _piece_table(self, vmobject: VMobject) -> tuple[np.ndarray, np.ndarray]:
+        """Projected points and ``(start, end, flags)`` rows per depth piece
+        (:meth:`.VMobject.get_depth_piece_ranges`), once per frame.
 
-        Subpaths are split on the 3D points, as in
-        :meth:`.VMobject.get_depth_pieces`, so piece indices line up.
+        ``flags`` has bit 0 when the piece's subpath is closed, bit 1 when the
+        piece starts its subpath and bit 2 when it ends it: the native module
+        joins pieces of one subpath drawn together, and closes a subpath
+        drawn whole.
         """
         key = id(vmobject)
-        cached = self._subpath_tables.get(key)
+        cached = self._piece_tables.get(key)
         if cached is not None and cached[0] is vmobject:
             return cached[1], cached[2]
+        ranges = vmobject.get_depth_piece_ranges()
         split = vmobject.get_subpath_split_indices_from_points(vmobject.points)
         points = np.ascontiguousarray(
             manim_core.tame_huge_curves(
@@ -345,7 +384,7 @@ class SkiaDrawingContext:
             ),
             dtype=np.float64,
         )
-        if len(points) != len(vmobject.points) or not len(split):
+        if ranges is None or len(points) != len(vmobject.points) or not len(split):
             table = np.zeros((0, 3), dtype=np.int64)
         else:
             starts, ends = split[:, 0], split[:, 1]
@@ -354,10 +393,18 @@ class SkiaDrawingContext:
             closed = np.all(
                 np.abs(first - last) <= tolerance + 1e-5 * np.abs(last), axis=1
             )
-            table = np.ascontiguousarray(
-                np.stack([starts, ends, closed], axis=1), dtype=np.int64
+            subpath = np.clip(
+                np.searchsorted(starts, ranges[:, 0], side="right") - 1, 0, None
             )
-        self._subpath_tables[key] = (vmobject, points, table)
+            flags = (
+                closed[subpath].astype(np.int64)
+                | np.where(ranges[:, 0] == starts[subpath], 2, 0)
+                | np.where(ranges[:, 1] == ends[subpath], 4, 0)
+            )
+            table = np.ascontiguousarray(
+                np.column_stack([ranges, flags]), dtype=np.int64
+            )
+        self._piece_tables[key] = (vmobject, points, table)
         return points, table
 
     def _set_stroke_style(self, context, vmobject: VMobject, width: float) -> None:
@@ -430,16 +477,6 @@ class SkiaDrawingContext:
         light, dark = (*images, None, None)[:2]
         # A textured surface shows its images as they are, as in ManimGL.
         color = (1.0, 1.0, 1.0, 1.0) if images else (*surface.color.to_rgb(), 1.0)
-        # Depth pieces of a translucent surface first clear what was drawn
-        # behind them to the background, as a depth buffer would hide it.
-        occlude = None
-        if surface.get_opacity() < 1:
-            occlude = tuple(
-                float(c)
-                for c in camera.background_color.to_rgba_with_alpha(
-                    camera.background_opacity
-                )
-            )
         spec = (
             (
                 np.ascontiguousarray(projected[:, :2], dtype=np.float32),
@@ -455,7 +492,7 @@ class SkiaDrawingContext:
                 tuple(float(c) for c in _camera_position(camera)),
                 tuple(float(c) for c in surface.shading),
             ),
-            (tuple(float(c) for c in color), float(surface.get_opacity()), occlude),
+            (tuple(float(c) for c in color), float(surface.get_opacity())),
         )
         self._meshes[key] = (surface, spec)
         return spec

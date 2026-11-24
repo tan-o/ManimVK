@@ -1,9 +1,10 @@
 """Depth-tested mobjects and mesh surfaces in a ThreeDScene.
 
-The camera orders depth pieces (subpaths of depth-tested VMobjects, triangles
-of mesh surfaces) back to front in depth slices; the Skia drawing context sends
-the runs of a frame's VMobjects and meshes in one native call.  The native
-module is a recorder here, so these check calls, not pixels.
+The camera orders depth pieces (curves of depth-tested strokes, subpaths of
+filled VMobjects) back to front in depth slices, each run with the depth key
+of its nearest piece; mesh surfaces draw first, whole.  The Skia drawing
+context sends the runs of a frame's VMobjects and meshes in one native call.
+The native module is a recorder here, so these check calls, not pixels.
 """
 
 from __future__ import annotations
@@ -41,13 +42,31 @@ def _hairs(count: int, radius: float = 1.0) -> VMobject:
     return hairs.apply_depth_test()
 
 
-def test_depth_pieces_are_subpath_centers():
+def test_depth_pieces_of_a_stroke_are_its_curves():
     hairs = _hairs(10)
     centers = hairs.get_depth_pieces()
     assert centers.shape == (10, 3)
     np.testing.assert_allclose(centers, hairs.points.reshape(10, 4, 3).mean(axis=1))
     assert VMobject().get_depth_pieces() is None
     assert _hairs(10).deactivate_depth_test().get_depth_pieces() is None
+    # One line around a sphere is a part per curve, not one part.
+    t = np.linspace(0, 2 * np.pi, 33)
+    ring = VMobject(fill_opacity=0).set_points_as_corners(
+        np.column_stack([np.cos(t), np.sin(t), np.zeros_like(t)])
+    )
+    ring.apply_depth_test()
+    np.testing.assert_array_equal(
+        ring.get_depth_piece_ranges(), np.column_stack([np.arange(0, 128, 4), np.arange(4, 132, 4)])
+    )
+
+
+def test_depth_pieces_of_a_fill_are_its_subpaths():
+    squares = VMobject(fill_opacity=0.5)
+    squares.set_points_as_corners([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0]])
+    squares.start_new_path(np.array([3.0, 0, 0]))
+    squares.add_points_as_corners([[4, 0, 0], [4, 1, 0], [3, 0, 0]])
+    squares.apply_depth_test()
+    np.testing.assert_array_equal(squares.get_depth_piece_ranges(), [[0, 12], [12, 24]])
 
 
 def test_draw_order_runs_far_to_near_and_flat_last():
@@ -86,7 +105,7 @@ def test_mesh_surface_follows_the_transformed_surface():
     np.testing.assert_allclose(
         np.linalg.norm(mesh.points - [1, 0, 0], axis=1), 2, atol=1e-9
     )
-    assert mesh.get_depth_pieces().shape == (64, 3, 3)
+    assert mesh.get_depth_pieces() is None
 
 
 def test_mesh_normals_point_outward_along_du_cross_dv():
@@ -126,27 +145,29 @@ class _Target:
 
         return record
 
-    def draw_display_list(self, objects, meshes, runs, parts):
+    def draw_display_list(self, objects, meshes, runs, parts, keys):
         self.calls["draw_display_list"] += 1
         assert runs.dtype == np.int64
         assert runs.shape[1] == 4
         assert parts.dtype == np.int64
-        for kind, index, start, end in runs.tolist():
+        assert keys.dtype == np.float32
+        assert len(keys) == len(runs)
+        for (kind, index, start, end), key in zip(runs.tolist(), keys.tolist(), strict=True):
             if kind == 0:
                 self.calls["vmobject_runs"] += 1
                 whole = len(objects[index][1])
                 self.calls["subpaths"] += end - start if end > start else whole
+                self.calls["depth_keys"] += int(np.isfinite(key))
                 continue
+            assert not self.calls["vmobject_runs"], "meshes draw first"
+            assert end == start, "meshes draw whole"
             (xy, points, normals, uvs, depth, triangles), _, _, style = meshes[index]
             assert xy.dtype == points.dtype == normals.dtype == np.float32
             assert len(xy) == len(points) == len(normals) == len(uvs) == len(depth)
             assert triangles.dtype == np.int32
+            assert len(style) == 2
             self.calls["mesh_runs"] += 1
-            self.calls["mesh_triangles"] += (
-                end - start if end > start else len(triangles)
-            )
-            if style[2] is not None and end > start:
-                self.calls["occlude"] += 1
+            self.calls["mesh_triangles"] += len(triangles)
 
     def restore_static_layer(self):
         return False
@@ -196,9 +217,10 @@ def test_hairs_and_mesh_draw_in_few_runs(calls, tmp_path):
     # Every hair and every triangle is drawn once ...
     assert calls["subpaths"] == 3000
     assert calls["mesh_triangles"] == 2 * 12 * 6
-    # ... in a few dozen runs, not one per piece, all in one call per frame.
+    # ... in at most a run per depth slice, not one per piece, all in one
+    # call per frame; the mesh in one run.
     assert calls["draw_display_list"] == 1
     assert calls["vmobject_runs"] <= ThreeDCamera.depth_slices
-    assert calls["mesh_runs"] <= ThreeDCamera.depth_slices
-    # The translucent sphere hides what is behind it.
-    assert calls["occlude"] == calls["mesh_runs"]
+    assert calls["mesh_runs"] == 1
+    # Every hair run is tested against the sphere's depth.
+    assert calls["depth_keys"] == calls["vmobject_runs"]

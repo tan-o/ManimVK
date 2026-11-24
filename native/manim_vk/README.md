@@ -49,18 +49,26 @@ DOCS_RS=1 cargo clippy
   `manim/_native.py`; bump both when a binding changes.  `import manim`
   refuses an extension built from older sources.
 - Display list (`display_list.rs`): `draw_display_list(objects, meshes, runs,
-  parts)` draws a frame's VMobjects and surface meshes in one call.  Each
-  VMobject comes once (projected points, `(start, end, closed)` subpath rows,
-  prebuilt paints), each mesh once (vertices, triangles, images, lighting),
-  then `(kind, object, start, end)` runs in drawing order, each drawing a
-  whole object or the depth pieces `parts[start..end]`.
+  parts, keys)` draws a frame's VMobjects and surface meshes in one call.
+  Each VMobject comes once (projected points, `(start, end, flags)` rows of
+  subpaths or depth pieces, prebuilt paints), each mesh once (vertices,
+  triangles, images, lighting), then `(kind, object, start, end)` runs in
+  drawing order, each drawing a mesh, a whole VMobject or its depth pieces
+  `parts[start..end]`, with one float32 depth key per run.  The pieces of a
+  run are drawn one path per 128-pixel screen tile, small enough for Ganesh's
+  GPU path atlas (a larger anti-aliased path is rasterised on the CPU into a
+  cached mask the size of its bounds).
 - Meshes (`meshes.rs`) are Skia custom meshes (`SkMesh`) whose SkSL is
   ManimGL's surface shading (`finalize_color.glsl`, `surface`,
   `textured_surface`).  Their depth (`depth.rs`) comes from a Vulkan render
   pass of our own with a real depth attachment, on the same device and queue
-  as Skia: it draws the opaque mesh triangles once per frame, and the mesh
-  fragment shader discards what lies behind the nearest one.  Its shaders
-  are GLSL, compiled to SPIR-V with naga.
+  as Skia, run twice a frame: the nearest opaque mesh per pixel, and the
+  nearest mesh of any opacity.  An opaque mesh is tested against the first,
+  a translucent one against the second; each VMobject run with a depth key is
+  clipped (`clipShader`) to where the second holds nothing nearer.  The pass's
+  shaders are GLSL, compiled to SPIR-V with naga.
+- `memory_usage()` returns the driver's device-local heap usage
+  (`VK_EXT_memory_budget`, None without it) and Skia's budgeted cache.
 
 - Keyed textures (`textures.rs`): Python names every read-only pixel array
   (image files, `ImageMobject` sources, mesh atlases) with a process-unique

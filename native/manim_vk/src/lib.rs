@@ -27,7 +27,7 @@ use skia_safe::vertices::{VertexMode, Vertices};
 use skia_safe::{
     gpu, AlphaType, BlendMode, ClipOp, Color, Color4f, ColorType, CubicResampler, Data, FilterMode,
     IRect, Image, ImageInfo as SkImageInfo, Matrix, MipmapMode, Paint, PathBuilder, Point, Rect,
-    RuntimeEffect, SamplingOptions, TileMode, YUVColorSpace, M44,
+    RuntimeEffect, SamplingOptions, Shader, TileMode, YUVColorSpace, M44,
 };
 use textures::TextureCache;
 
@@ -284,11 +284,7 @@ fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
         )
         .build()
     });
-    let mut options = gpu::ContextOptions::new();
-    // Samples of dynamic MSAA and of the path atlas: the device's count up
-    // to 8 (Skia's default is 4, sized for phones).
-    options.internal_multisample_count = 8;
-    let context = gpu::direct_contexts::make_vulkan(&backend, &options)
+    let context = gpu::direct_contexts::make_vulkan(&backend, None)
         .ok_or_else(|| PyRuntimeError::new_err("Skia make_vulkan returned None"))?;
     Ok(Rc::new(GpuShared {
         _backend: backend,
@@ -348,9 +344,13 @@ struct SkiaTarget {
     textures: TextureCache,
     /// The surface mesh shaders, compiled on first use.
     mesh_spec: Option<skia_safe::mesh::MeshSpecification>,
-    /// The Vulkan pass that gives meshes their exact depth, made on first
-    /// use; it holds the device itself and frees its objects before it.
-    depth_pass: Option<depth::DepthPass>,
+    /// The Vulkan passes that give meshes their exact depth, made on first
+    /// use: the nearest opaque mesh, and the nearest mesh of any opacity.
+    /// Each holds the device itself and frees its objects before it.
+    opaque_depth: Option<depth::DepthPass>,
+    all_depth: Option<depth::DepthPass>,
+    /// The per-pixel depth test of VMobject runs, compiled on first use.
+    depth_clip: Option<RuntimeEffect>,
     /// The last transient background image (see `set_source_image`).
     transient_image: Option<(u64, Image)>,
     /// YUV reads in flight, oldest first, by ticket.
@@ -373,23 +373,13 @@ impl SkiaTarget {
             AlphaType::Premul,
             None,
         );
-        // Dynamic MSAA, as Chrome draws on Vulkan: simple shapes keep
-        // analytic coverage, and a complex path (a depth slice of thousands
-        // of strokes, a glyph run) is tessellated into a transient
-        // multisample attachment.  Without it, Ganesh rasterises each such
-        // path on the CPU into a mask texture the size of its bounds, and
-        // keeps the mask cached: a full-screen texture per slice per frame.
-        let props = skia_safe::SurfaceProps::new(
-            skia_safe::SurfacePropsFlags::DYNAMIC_MSAA,
-            skia_safe::PixelGeometry::Unknown,
-        );
         let surface = gpu::surfaces::render_target(
             &mut context,
             gpu::Budgeted::Yes,
             &info,
             None,
             gpu::SurfaceOrigin::TopLeft,
-            Some(&props),
+            None,
             false,
             None,
         )
@@ -418,10 +408,38 @@ impl SkiaTarget {
             textures: TextureCache::default(),
             transient_image: None,
             mesh_spec: None,
-            depth_pass: None,
+            opaque_depth: None,
+            all_depth: None,
+            depth_clip: None,
             yuv_reads: VecDeque::new(),
             next_ticket: 0,
         })
+    }
+
+    /// The depth image of `vertices` (see `depth`) as a shader in device
+    /// pixels, rendered by the pass in `slot`, made on first use; a
+    /// transparent shader (no mesh anywhere) without vertices.
+    fn depth_image(
+        slot: &mut Option<depth::DepthPass>,
+        inner: &Arc<DeviceInner>,
+        context: &mut gpu::DirectContext,
+        (width, height): (u32, u32),
+        vertices: &[f32],
+    ) -> PyResult<Shader> {
+        if vertices.is_empty() {
+            return Ok(skia_safe::shaders::color(Color::TRANSPARENT));
+        }
+        if slot.is_none() {
+            *slot = Some(depth::DepthPass::new(inner.clone(), context, width, height)?);
+        }
+        let pass = slot.as_mut().expect("created above");
+        pass.render(context, vertices)?
+            .to_raw_shader(
+                Some((TileMode::Clamp, TileMode::Clamp)),
+                SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
+                None,
+            )
+            .ok_or_else(|| PyRuntimeError::new_err("depth image shader failed"))
     }
 
     /// Replace every pixel of the surface with `image` at device scale.
@@ -634,16 +652,21 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Draw a frame's VMobjects and textured meshes, whole or as depth
-    /// pieces, in one call; see `display_list::draw`.  The canvas matrix maps
-    /// their scene points.  Mesh textures, with mipmaps, are kept per key.
+    /// Draw a frame's VMobjects and meshes in one call; see
+    /// `display_list::draw`.  The canvas matrix maps their scene points.
+    /// Mesh textures, with mipmaps, are kept per key.  `keys` is float32,
+    /// one depth key per run.
     fn draw_display_list<'py>(
         &mut self,
         objects: Vec<display_list::ObjectSpec<'py>>,
         meshes: Vec<meshes::MeshSpec<'py>>,
         runs: &Bound<'py, PyAny>,
         parts: &Bound<'py, PyAny>,
+        keys: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
+        let keys = PyBuffer::<f32>::get(keys)
+            .and_then(|buffer| buffer.to_vec(keys.py()))
+            .map_err(|error| PyValueError::new_err(format!("run keys: {error}")))?;
         let objects = objects
             .into_iter()
             .map(display_list::object)
@@ -662,55 +685,68 @@ impl SkiaTarget {
             self.matrix_tx,
             self.matrix_ty,
         ];
-        let range = prepared
+        let key_range = prepared
             .iter()
             .filter_map(meshes::Mesh::depth_range)
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-        let mut depth_vertices = Vec::new();
-        if let Some(range) = range {
+        let (mut opaque, mut all) = (Vec::new(), Vec::new());
+        if let Some(range) = key_range {
             for mesh in &mut prepared {
                 mesh.normalise(range);
-                mesh.depth_vertices(to_device, &mut depth_vertices);
+                mesh.depth_vertices(to_device, false, &mut opaque);
+                mesh.depth_vertices(to_device, true, &mut all);
             }
         }
-        let has_depth = !depth_vertices.is_empty();
-        let depth = if has_depth {
-            if self.depth_pass.is_none() {
-                self.depth_pass = Some(depth::DepthPass::new(
-                    self._inner.clone(),
-                    &mut self.context,
-                    self.width,
-                    self.height,
-                )?);
-            }
-            let pass = self.depth_pass.as_mut().expect("created above");
-            pass.render(&mut self.context, &depth_vertices)?
-                .to_raw_shader(
-                    Some((TileMode::Clamp, TileMode::Clamp)),
-                    SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-                    None,
-                )
-                .ok_or_else(|| PyRuntimeError::new_err("depth image shader failed"))?
+        let has_opaque = !opaque.is_empty();
+        let has_any = !all.is_empty();
+        let opaque_depth = Self::depth_image(
+            &mut self.opaque_depth,
+            &self._inner,
+            &mut self.context,
+            (self.width, self.height),
+            &opaque,
+        )?;
+        // Without translucent meshes both images are the same.
+        let all_depth = if all.len() == opaque.len() {
+            opaque_depth.clone()
         } else {
-            skia_safe::shaders::color(Color::TRANSPARENT)
+            Self::depth_image(
+                &mut self.all_depth,
+                &self._inner,
+                &mut self.context,
+                (self.width, self.height),
+                &all,
+            )?
         };
         if self.mesh_spec.is_none() && !prepared.is_empty() {
             self.mesh_spec = Some(meshes::specification()?);
         }
+        if self.depth_clip.is_none() {
+            self.depth_clip = Some(
+                RuntimeEffect::make_for_shader(display_list::DEPTH_CLIP_SKSL, None)
+                    .map_err(|error| PyRuntimeError::new_err(format!("depth clip: {error}")))?,
+            );
+        }
         let frame = meshes::Frame {
             spec: self.mesh_spec.clone(),
-            depth,
-            has_depth,
+            opaque_depth,
+            has_opaque,
+            all_depth,
+            has_any,
+            key_range,
             to_device,
         };
+        let clip = self.depth_clip.clone().expect("compiled above");
         display_list::draw(
             self.surface.canvas(),
             &mut self.context,
             &objects,
             &prepared,
             &frame,
+            &clip,
             runs,
             parts,
+            &keys,
         )
     }
 
@@ -1222,7 +1258,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 6;
+const API_VERSION: u32 = 7;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {

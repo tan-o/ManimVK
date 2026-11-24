@@ -49,8 +49,10 @@ class DrawOrder(NamedTuple):
 
     Run ``k`` draws ``mobjects[owner[k]]``: whole when ``start[k] == end[k]``,
     otherwise its depth pieces ``parts[start[k]:end[k]]`` (indices into
-    :meth:`.Mobject.get_depth_pieces`).  Arrays, not one Python object per
-    run: a depth-sorted field of arrows has tens of thousands of runs.
+    :meth:`.Mobject.get_depth_pieces`).  ``key[k]`` is the depth key
+    ``1 / (focal_distance - z)`` of the nearest of them (larger is nearer),
+    NaN for a run that is not drawn in depth.  Arrays, not one Python object
+    per run: a depth-sorted field of arrows has tens of thousands of runs.
     """
 
     mobjects: list[Mobject]
@@ -58,6 +60,7 @@ class DrawOrder(NamedTuple):
     start: np.ndarray
     end: np.ndarray
     parts: np.ndarray
+    key: np.ndarray
 
     @classmethod
     def whole(cls, mobjects: list[Mobject]) -> DrawOrder:
@@ -69,6 +72,7 @@ class DrawOrder(NamedTuple):
             zeros,
             zeros,
             np.zeros(0, dtype=np.int64),
+            np.full(len(mobjects), np.nan),
         )
 
     def runs(self) -> Iterator[tuple[Mobject, np.ndarray | None]]:
@@ -711,8 +715,10 @@ class ThreeDCamera(Camera):
         return sorted(mobjects, key=z_key)
 
     #: Number of depth slices used when depth pieces are present; see
-    #: :meth:`get_draw_order`.
-    depth_slices = 64
+    #: :meth:`get_draw_order`.  A run is tested against mesh depth with the
+    #: key of its nearest piece, so a piece at most one slice behind a mesh
+    #: surface may show in front of it.
+    depth_slices = 128
 
     def get_draw_order(
         self,
@@ -721,73 +727,89 @@ class ThreeDCamera(Camera):
     ) -> DrawOrder:
         """Order depth pieces and 3D mobjects back to front.
 
-        Without depth pieces (see :meth:`.Mobject.get_depth_pieces`) this is
-        the order of :meth:`get_mobjects_to_display`.  With them, every piece
-        and every ``shade_in_3d`` or depth-tested mobject is put in one of
-        :attr:`depth_slices` slices of the frame's depth range.  Slices draw far
-        to near; inside a slice, top-level scene mobjects (``roots`` maps
-        ``id(mobject)`` to its top-level index) draw in scene order, and the
-        parts of one top-level mobject far to near.  Consecutive pieces of one
-        mobject form one run.  Mobjects that are not 3D are drawn last, in
-        display order.
+        Every piece (see :meth:`.Mobject.get_depth_pieces`) and every
+        ``shade_in_3d`` or depth-tested mobject without pieces is put in one
+        of :attr:`depth_slices` slices of the frame's depth range.  Slices
+        draw far to near; inside a slice, top-level scene mobjects (``roots``
+        maps ``id(mobject)`` to its top-level index) draw in scene order;
+        inside one of them, its mobjects without pieces far to near, then the
+        pieces of each mobject with pieces, in family order, far to near.
+        The pieces of one mobject in one slice form one run, drawn as one
+        path.  Mobjects that are not 3D are drawn last, in
+        display order.  Each 3D run carries the depth key of its nearest
+        point, with which the renderer tests it against the depth of mesh
+        surfaces per pixel.
         """
-        pieces: dict[int, np.ndarray] = {}
-        for index, mobject in enumerate(mobjects):
-            if mobject.depth_test:
-                centers = mobject.get_depth_pieces()
-                if centers is not None and len(centers):
-                    pieces[index] = np.asarray(centers, dtype=float)
-        if not pieces:
+        if not mobjects:
             return DrawOrder.whole(mobjects)
-
         depth_axis = self.get_rotation_matrix()[2]
+        focal_distance = self.get_focal_distance()
+
+        def keys(mobject: Mobject, points: np.ndarray) -> np.ndarray:
+            z = self.transform_points_pre_display(mobject, points)[:, 2]
+            return 1 / np.maximum(focal_distance - z, 1e-6)
+
         roots = roots or {}
+        members = len(mobjects) + 1
         owners: list[np.ndarray] = []
         parts: list[np.ndarray] = []
         depths: list[np.ndarray] = []
         groups: list[np.ndarray] = []
+        piece_keys: list[np.ndarray] = []
+        pieced = False
         for index, mobject in enumerate(mobjects):
             root = roots.get(id(mobject), index)
-            if index in pieces:
-                count = len(pieces[index])
-                piece_depths = pieces[index] @ depth_axis
-                if piece_depths.ndim == 2:
-                    # Pieces given by their corners are as far as their
-                    # farthest corner: a surface triangle is drawn before what
-                    # lies on top of it.
-                    piece_depths = piece_depths.min(axis=1)
+            centers = mobject.get_depth_pieces() if mobject.depth_test else None
+            if centers is not None and len(centers):
+                centers = np.asarray(centers, dtype=float)
+                count = len(centers)
                 owners.append(np.full(count, index))
                 parts.append(np.arange(count))
-                depths.append(piece_depths)
-                groups.append(np.full(count, root))
+                depths.append(centers @ depth_axis)
+                groups.append(np.full(count, root * members + index + 1))
+                piece_keys.append(keys(mobject, centers))
+                pieced = True
                 continue
             is_3d = mobject.depth_test or getattr(mobject, "shade_in_3d", False)
             owners.append(np.array([index]))
             parts.append(np.array([-1]))
-            depths.append(
-                np.array([np.dot(mobject.get_z_index_reference_point(), depth_axis)])
-                if is_3d
-                else np.array([np.inf])
-            )
+            if is_3d:
+                depths.append(
+                    np.array([np.dot(mobject.get_z_index_reference_point(), depth_axis)])
+                )
+                points = mobject.points
+                piece_keys.append(
+                    np.array([keys(mobject, points).max() if len(points) else np.nan])
+                )
+            else:
+                depths.append(np.array([np.inf]))
+                piece_keys.append(np.array([np.nan]))
             # Flat mobjects keep their display order among themselves.
-            groups.append(np.array([root if is_3d else index]))
+            groups.append(np.array([root * members if is_3d else index]))
         owner = np.concatenate(owners)
         part = np.concatenate(parts)
-        depth = np.concatenate(depths)
-        group = np.concatenate(groups)
+        key = np.concatenate(piece_keys)
+        depth_slice = np.zeros(len(owner), dtype=np.int64)
+        if pieced:
+            order, depth_slice = manim_core.depth_order(
+                np.concatenate(depths), np.concatenate(groups), self.depth_slices
+            )
+            owner, part, key = owner[order], part[order], key[order]
 
-        order = manim_core.depth_order(depth, group, self.depth_slices)
-        owner, part = owner[order], part[order]
-
-        starts = np.flatnonzero(np.diff(owner, prepend=-1) != 0)
+        # A run ends where the mobject or the slice changes: its key is that
+        # of its nearest piece, so it must not span the depth range.
+        starts = np.flatnonzero(
+            (np.diff(owner, prepend=-1) != 0) | (np.diff(depth_slice, prepend=-1) != 0)
+        )
         ends = np.append(starts[1:], len(owner))
-        pieced = part[starts] >= 0
+        has_pieces = part[starts] >= 0
         return DrawOrder(
             mobjects,
             owner[starts].astype(np.int64),
-            np.where(pieced, starts, 0).astype(np.int64),
-            np.where(pieced, ends, 0).astype(np.int64),
+            np.where(has_pieces, starts, 0).astype(np.int64),
+            np.where(has_pieces, ends, 0).astype(np.int64),
             part.astype(np.int64),
+            np.maximum.reduceat(key, starts) if len(starts) else key,
         )
 
     def get_phi(self) -> float:

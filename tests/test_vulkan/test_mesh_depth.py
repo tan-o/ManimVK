@@ -17,8 +17,10 @@ from manim import (  # noqa: E402
     DEGREES,
     OUT,
     RED,
+    WHITE,
     MeshSurface,
     Sphere,
+    VMobject,
     tempconfig,
 )
 from manim.camera import ThreeDCamera  # noqa: E402
@@ -137,3 +139,82 @@ def test_opaque_surface_inside_a_translucent_one_is_drawn_through_it():
     # Red under half-transparent blue, never the background.
     assert np.all(frame[inside, 0] > 0.3)
     assert np.all(frame[inside, 2] > 0.3)
+
+
+def _pixels(camera, points):
+    """Device pixel (column, row) of scene points, and whether each lies on
+    the side of a sphere about the origin that faces the camera, with the
+    cosine between the outward normal and the direction to the eye."""
+    with tempconfig({"pixel_width": WIDTH, "pixel_height": HEIGHT}):
+        frame_width, frame_height = camera.frame_width, camera.frame_height
+    projected = camera.project_points(points)
+    column = ((projected[:, 0] / frame_width + 0.5) * WIDTH).astype(int)
+    row = ((0.5 - projected[:, 1] / frame_height) * HEIGHT).astype(int)
+    rotation = camera.get_rotation_matrix()
+    center = np.asarray(camera.frame_center, dtype=float)
+    eye = center + rotation.T @ np.array([0.0, 0.0, camera.get_focal_distance()])
+    normal = points / np.linalg.norm(points, axis=1, keepdims=True)
+    to_eye = eye - points
+    facing = np.sum(normal * to_eye, axis=1) / np.linalg.norm(to_eye, axis=1)
+    return column, row, facing
+
+
+def test_a_line_on_a_translucent_sphere_shows_on_its_near_side_only():
+    # ManimGL's SurfaceMesh lines: on the sphere, nudged out by 0.01.  One
+    # long line, the equator, passes in front of the sphere and behind it.
+    camera = ThreeDCamera(phi=60 * DEGREES, theta=-80 * DEGREES)
+    t = np.linspace(0, 2 * np.pi, 129)
+    equator = 2.01 * np.column_stack([np.cos(t), np.sin(t), np.zeros_like(t)])
+    line = VMobject(stroke_color=WHITE, stroke_width=6, fill_opacity=0)
+    line.set_points_as_corners(equator).apply_depth_test()
+    sphere = _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.5)
+    alone = _render(camera, [sphere])
+    both = _render(camera, [sphere, line])
+    column, row, facing = _pixels(camera, equator)
+    inside = (column >= 1) & (column < WIDTH - 1) & (row >= 1) & (row < HEIGHT - 1)
+    difference = np.abs(both - alone).max(axis=-1)
+    # The stroke is a few pixels wide and drawn at the depth of its centre
+    # line, as ManimGL draws it: where the surface rises towards the camera
+    # beside the line, the stroke's edge on that side is hidden.  Look at
+    # the 3 x 3 pixels around each sample.
+    around = np.max(
+        [
+            difference[row[inside] + dy, column[inside] + dx]
+            for dy in (-1, 0, 1)
+            for dx in (-1, 0, 1)
+        ],
+        axis=0,
+    )
+    changed = around > 0.1
+    # Close to the silhouette the near and far halves are a few pixels
+    # apart on screen; leave out samples facing within 0.3 of sideways.
+    near, far = facing[inside] > 0.3, facing[inside] < -0.3
+    assert near.sum() > 20 and far.sum() > 20
+    # Over the whole near side the line is drawn; behind the sphere, nowhere.
+    assert changed[near].all(), f"{(~changed[near]).sum()} near samples missing"
+    assert not changed[far].any(), f"{changed[far].sum()} far samples drawn"
+
+
+def test_a_translucent_sphere_blends_its_near_side_once():
+    camera = _camera()
+    sphere = _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.5)
+    frame = _render(camera, [sphere])
+    nearest, ambiguous = _cast(camera, [((0, 0, 0), 2.0)])
+    inside = (nearest == 0) & ~ambiguous
+    # Half of BLUE over the black background, not a quarter more for the
+    # far side seen through the near one.
+    blue = np.array(BLUE.to_rgb())
+    error = np.abs(frame[inside, :3] - 0.5 * blue).max()
+    assert error <= 2 / 255, f"{error * 255:.1f} levels off half of BLUE"
+
+
+def test_a_fully_transparent_surface_hides_nothing():
+    # HairyEarth adds the Earth at opacity 0 and fades it in.
+    camera = ThreeDCamera(phi=60 * DEGREES, theta=-80 * DEGREES)
+    t = np.linspace(0, 2 * np.pi, 129)
+    line = VMobject(stroke_color=WHITE, stroke_width=6, fill_opacity=0)
+    line.set_points_as_corners(
+        1.5 * np.column_stack([np.cos(t), np.sin(t), np.zeros_like(t)])
+    ).apply_depth_test()
+    hidden = _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.0)
+    np.testing.assert_array_equal(_render(camera, [hidden, line]), _render(camera, [line]))

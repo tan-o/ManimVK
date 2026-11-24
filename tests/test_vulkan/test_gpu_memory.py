@@ -113,9 +113,10 @@ def test_a_steady_animation_keeps_gpu_memory_level(tmp_path):
         "\nskia MB per frame:", np.round(skia, 1).tolist(),
         "\ndevice MB per frame:", [row[1] and round(row[1] / MB, 1) for row in usage[WARM_UP:]],
     )
-    # Skia keeps what a frame needed, up to its 256 MB budget.  Tessellated
-    # paths need a few render targets; CPU masks of depth slices would need
-    # a 1280x720 texture per slice and object, and fill the budget.
+    # Skia keeps what a frame needed, up to its 256 MB budget.  Depth slices
+    # drawn per screen tile go through its path atlas; drawn as one path
+    # each, they were rasterised on the CPU into a cached 1280x720 mask per
+    # slice and object, which filled the budget.
     assert skia.max() < 128
     # One leaked 1280x720 RGBA texture a frame would add 140 MB.
     assert rss[-1] - rss[0] < 48

@@ -250,15 +250,18 @@ fn range_means<'py>(
     Ok(means.into_pyarray(py))
 }
 
-/// The order that draws depth pieces back to front; see
-/// `geometry::depth_order`.
+/// The order that draws depth pieces back to front and the depth slice of
+/// each piece in that order; see `geometry::depth_order`.
 #[pyfunction]
 fn depth_order<'py>(
     py: Python<'py>,
     depth: PyArrayLike1<'py, f64, AllowTypeChange>,
     group: PyArrayLike1<'py, i64, AllowTypeChange>,
     depth_slices: usize,
-) -> PyResult<Bound<'py, numpy::PyArray1<i64>>> {
+) -> PyResult<(
+    Bound<'py, numpy::PyArray1<i64>>,
+    Bound<'py, numpy::PyArray1<i64>>,
+)> {
     let (depth, group) = (depth.as_array(), group.as_array());
     if depth.len() != group.len() || depth_slices == 0 {
         return Err(PyValueError::new_err(
@@ -266,12 +269,10 @@ fn depth_order<'py>(
         ));
     }
     let (depth, group) = (depth.to_vec(), group.to_vec());
-    let order = py.allow_threads(|| geometry::depth_order(&depth, &group, depth_slices));
-    Ok(order
-        .into_iter()
-        .map(|i| i as i64)
-        .collect::<Vec<_>>()
-        .into_pyarray(py))
+    let (order, slices) =
+        py.allow_threads(|| geometry::depth_order(&depth, &group, depth_slices));
+    let to_i64 = |values: Vec<usize>| values.into_iter().map(|v| v as i64).collect::<Vec<_>>();
+    Ok((to_i64(order).into_pyarray(py), to_i64(slices).into_pyarray(py)))
 }
 
 /// A copy of `points` with curves beyond `limit` as clamped straight lines;
@@ -354,7 +355,7 @@ fn arrow_points<'py>(
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a function is added or changes its signature or behaviour.
-const API_VERSION: u32 = 3;
+const API_VERSION: u32 = 4;
 
 #[pymodule]
 fn manim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {

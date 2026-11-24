@@ -3614,10 +3614,13 @@ class Mobject:
         """Draw this mobject at its depth in a :class:`.ThreeDScene`.
 
         Depth-tested mobjects are ordered back to front together with the
-        ``shade_in_3d`` mobjects, so that nearer objects cover farther ones.  A
-        depth-tested :class:`.VMobject` is ordered per subpath: a vector field
-        made of one path per arrow is partly hidden behind a sphere and partly
-        in front of it.  Other cameras ignore this flag.
+        ``shade_in_3d`` mobjects, so that nearer objects cover farther ones,
+        and are hidden per pixel behind mesh surfaces
+        (:class:`.MeshSurface`).  A depth-tested :class:`.VMobject` is ordered
+        in parts (see :meth:`.VMobject.get_depth_piece_ranges`): a vector
+        field made of one path per arrow, or a line around a sphere, is
+        partly hidden behind the sphere and partly in front of it.  Other
+        cameras ignore this flag.
         """
         for mobject in self.get_family() if family else [self]:
             mobject.depth_test = value
@@ -3632,10 +3635,9 @@ class Mobject:
 
         ``None`` means the mobject is ordered as a whole, by
         :meth:`get_z_index_reference_point`.  Subclasses that are drawn in
-        parts return one point per part, shape ``(n, 3)``, or the corners of
-        each part, shape ``(n, k, 3)``, which orders a part by its farthest
-        corner.  The renderer passes the indices of the parts to draw back to
-        the mobject's drawing code.
+        parts return one point per part, shape ``(n, 3)``.  The renderer
+        passes the indices of the parts to draw back to the mobject's drawing
+        code.
         """
         return None
 

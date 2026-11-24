@@ -270,9 +270,13 @@ class SphereFlow(VGroup):
         return self
 
 
-def sphere_mesh_lines(radius: float, resolution=(51, 25), samples: int = 64) -> VMobject:
-    """Latitude and longitude lines on a sphere (ManimGL's SurfaceMesh of it)."""
+def sphere_mesh_lines(
+    radius: float, resolution=(51, 25), samples: int = 64, normal_nudge: float = 1e-2
+) -> VMobject:
+    """Latitude and longitude lines on a sphere (ManimGL's SurfaceMesh of it),
+    nudged out along the normals by ``normal_nudge`` as SurfaceMesh does."""
     nu, nv = resolution
+    radius = radius + normal_nudge
     t = np.linspace(0, 1, samples)
     segments = []
     for u in np.linspace(0, TAU, nu)[:-1]:

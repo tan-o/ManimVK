@@ -108,7 +108,7 @@ pub fn project_points(
 }
 
 /// The mean of the points of each `[start, end)` range, in parallel: the
-/// centers of a VMobject's subpaths, its depth pieces.
+/// centers of a VMobject's depth pieces (curves or subpaths).
 pub fn range_means(points: ArrayView2<f64>, ranges: &[(usize, usize)]) -> Array2<f64> {
     let dims = points.ncols();
     let mut means = Array2::<f64>::zeros((ranges.len(), dims));
@@ -130,8 +130,14 @@ pub fn range_means(points: ArrayView2<f64>, ranges: &[(usize, usize)]) -> Array2
 /// The drawing order of depth pieces: by depth slice (`depth_slices` slices
 /// between the nearest and farthest finite depth, far to near), then by
 /// group, then by depth, then by index (so equal keys keep their order).
-/// Pieces with an infinite depth go after every slice, by group and index.
-pub fn depth_order(depth: &[f64], group: &[i64], depth_slices: usize) -> Vec<usize> {
+/// Pieces with an infinite depth go after every slice (in slice
+/// `depth_slices`), by group and index.  Returns the order and the slice of
+/// each piece in that order.
+pub fn depth_order(
+    depth: &[f64],
+    group: &[i64],
+    depth_slices: usize,
+) -> (Vec<usize>, Vec<usize>) {
     let finite = || depth.iter().copied().filter(|d| d.is_finite());
     let low = finite().fold(f64::INFINITY, f64::min);
     let high = finite().fold(f64::NEG_INFINITY, f64::max);
@@ -155,7 +161,7 @@ pub fn depth_order(depth: &[f64], group: &[i64], depth_slices: usize) -> Vec<usi
             .then(a.2.total_cmp(&b.2))
             .then(a.3.cmp(&b.3))
     });
-    keys.into_iter().map(|key| key.3).collect()
+    keys.into_iter().map(|key| (key.3, key.0)).unzip()
 }
 
 /// Replace every curve with a coordinate beyond `limit` by the straight line
@@ -244,7 +250,9 @@ mod tests {
         let depth = [3.0, 0.0, f64::INFINITY, 1.0, 0.5];
         let group = [0, 1, 0, 0, 0];
         // Two slices: [0, 1.5) holds 0.0, 1.0 and 0.5; [1.5, 3] holds 3.0.
-        assert_eq!(depth_order(&depth, &group, 2), vec![4, 3, 1, 0, 2]);
+        let (order, slices) = depth_order(&depth, &group, 2);
+        assert_eq!(order, vec![4, 3, 1, 0, 2]);
+        assert_eq!(slices, vec![0, 0, 0, 1, 2]);
     }
 
     #[test]

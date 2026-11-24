@@ -38,12 +38,13 @@ class MeshSurface(Mobject):
 
     Where a :class:`.Surface` is a group of flat faces, each drawn on its own,
     this is one mesh lit per vertex like ManimGL's surfaces (with ManimGL's
-    lighting), and drawn in one GPU call.  In a :class:`.ThreeDScene`, opaque
-    mesh surfaces hide each other per pixel through a Vulkan depth buffer,
-    and their triangles are ordered by depth together with other
-    depth-tested mobjects (see :meth:`.Mobject.apply_depth_test`).  A
-    translucent mesh surface hides depth-tested mobjects behind it too, as a
-    depth buffer would, and shows the camera background through itself.
+    lighting), and drawn in one GPU call.  In a :class:`.ThreeDScene`, mesh
+    surfaces take part in a Vulkan depth buffer: opaque ones hide each other
+    and every depth-tested mobject behind them per pixel (see
+    :meth:`.Mobject.apply_depth_test`).  A translucent mesh surface hides its
+    own far side and the depth-tested mobjects behind it, as a depth buffer
+    would, and shows the camera background through itself; an opaque mesh
+    surface behind it shows through.
     Drawn by the Vulkan renderer only.
 
     Parameters
@@ -151,10 +152,6 @@ class MeshSurface(Mobject):
         image, or the day and night images) with their texture keys.
         """
         return []
-
-    def get_depth_pieces(self) -> np.ndarray:
-        """The corners of each triangle, shape ``(n, 3, 3)``."""
-        return self.points[self.triangles]
 
     def get_vertex_normals(self) -> np.ndarray:
         """Unit normals at the vertices, pointing along ``du x dv``.

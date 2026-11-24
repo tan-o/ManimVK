@@ -1387,18 +1387,32 @@ class VMobject(Mobject):
             lambda n: not self.consider_points_equals_2d(points[n - 1], points[n]),
         )
 
-    def get_depth_pieces(self) -> Point3D_Array | None:
-        """With :meth:`~.Mobject.apply_depth_test`, one center per subpath.
+    def get_depth_piece_ranges(self) -> npt.NDArray[np.int_] | None:
+        """With :meth:`~.Mobject.apply_depth_test`, the ``(n, 2)`` point index
+        ranges (end-exclusive) of the parts drawn at their own depth.
 
-        The indices passed back to the renderer index the rows of
-        ``get_subpath_split_indices_from_points(self.points)``.
+        A stroke can be cut anywhere, so without a fill every cubic curve is
+        a part: a long line around a sphere is hidden where it passes behind
+        it and shown where it passes in front.  A fill needs its whole
+        outline, so with one every subpath is a part.
         """
         if not self.depth_test or len(self.points) == 0:
             return None
-        split = self.get_subpath_split_indices_from_points(self.points)
-        if len(split) <= 1:
+        if self.get_fill_opacities().any():
+            split = self.get_subpath_split_indices_from_points(self.points)
+            return split if len(split) else None
+        size = self.n_points_per_cubic_curve
+        starts = np.arange(0, len(self.points) - size + 1, size)
+        return np.column_stack([starts, starts + size]) if len(starts) else None
+
+    def get_depth_pieces(self) -> Point3D_Array | None:
+        """The centers of :meth:`get_depth_piece_ranges`; the renderer passes
+        their indices back as the parts to draw.
+        """
+        ranges = self.get_depth_piece_ranges()
+        if ranges is None:
             return None
-        return manim_core.range_means(self.points, split)
+        return manim_core.range_means(self.points, ranges)
 
     def get_subpath_split_indices_from_points(
         self, points: CubicBezierPathLike, n_dims: int = 3

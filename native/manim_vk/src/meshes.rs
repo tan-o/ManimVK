@@ -4,9 +4,13 @@
 //! The shading is ManimGL's: `add_light` is `finalize_color.glsl`, an
 //! untextured surface is lit per vertex as in `surface/vert.glsl`, and a
 //! textured one per pixel, with the day and night images mixed across the
-//! terminator, as in `textured_surface/frag.glsl`.  The depth image holds the
-//! nearest opaque mesh at every pixel (see `depth`); a fragment behind it is
-//! not drawn, as a depth buffer would discard it.
+//! terminator, as in `textured_surface/frag.glsl`.
+//!
+//! Two depth images (see `depth`) hold, at every pixel, the nearest opaque
+//! mesh and the nearest mesh of any opacity.  An opaque mesh is tested
+//! against the first, a translucent one against the second, so that it
+//! shows only its nearest layer, once, over the opaque meshes behind it; a
+//! fragment that fails is not drawn, as a depth buffer would discard it.
 
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
@@ -32,9 +36,7 @@ pub type TextureSpec<'py> = (u64, Bound<'py, PyAny>, u32, u32);
 /// - images: the light and dark images, either may be `None`;
 /// - lighting: light position, camera position, shading
 ///   `(reflectiveness, gloss, shadow)`;
-/// - style: straight RGBA colour (multiplied with the images), opacity, and
-///   the background colour that clears what lies under translucent depth
-///   pieces, or `None`.
+/// - style: straight RGBA colour (multiplied with the images) and opacity.
 pub type MeshSpec<'py> = (
     (
         Bound<'py, PyAny>,
@@ -46,7 +48,7 @@ pub type MeshSpec<'py> = (
     ),
     (Option<TextureSpec<'py>>, Option<TextureSpec<'py>>),
     ([f32; 3], [f32; 3], [f32; 3]),
-    ([f32; 4], f32, Option<[f32; 4]>),
+    ([f32; 4], f32),
 );
 
 /// Bytes per vertex: position (2), point (3), normal (3), uv (2), depth (1).
@@ -113,8 +115,7 @@ uniform float textures;
 uniform float2 lightSize;
 uniform float2 darkSize;
 uniform float depthTest;
-uniform float mode;
-uniform float4 fill;
+uniform float opacity;
 {LIGHT}
 float2 main(const Varyings v, out float4 color) {{
     float3 point = v.pointDepth.xyz;
@@ -122,20 +123,15 @@ float2 main(const Varyings v, out float4 color) {{
     float2 uv = v.coords.xy;
     if (depthTest > 0.5) {{
         float3 bytes = floor(depthImage.eval(v.coords.zw).rgb * 255.0 + 0.5);
-        float opaque = dot(bytes, float3(65536.0, 256.0, 1.0)) / 16777215.0;
-        // Behind the nearest opaque mesh: discarded, as by a depth test.
-        // The slack (1/65536 of the depth range, 256 steps of the 24-bit
-        // image) keeps a mesh's own pixels, which Vulkan and Skia rasterise
-        // with slightly different rounding.  A translucent surface clears
-        // nothing where an opaque mesh is: that mesh shows through it.
-        if (depth < opaque - 1.0 / 65536.0 || (mode > 0.5 && opaque > 0.0)) {{
+        float nearest = dot(bytes, float3(65536.0, 256.0, 1.0)) / 16777215.0;
+        // Behind the nearest mesh of the image: discarded, as by a depth
+        // test.  The slack (1/65536 of the depth range, 256 steps of the
+        // 24-bit image) keeps a mesh's own pixels, which Vulkan and Skia
+        // rasterise with slightly different rounding.
+        if (depth < nearest - 1.0 / 65536.0) {{
             color = float4(0.0);
             return uv;
         }}
-    }}
-    if (mode > 0.5) {{
-        color = fill;
-        return uv;
     }}
     float4 c = v.color;
     if (textures > 0.5) {{
@@ -152,9 +148,8 @@ float2 main(const Varyings v, out float4 color) {{
         }}
         c = add_light(c * v.color, point, n);
     }}
-    // ManimGL draws the surface with its opacity, not the image's alpha;
-    // the opacity is applied to the mesh as a layer.
-    color = float4(saturate(c.rgb), 1.0);
+    // ManimGL draws the surface with its opacity, not the image's alpha.
+    color = float4(saturate(c.rgb) * opacity, opacity);
     return uv;
 }}
 "
@@ -231,7 +226,6 @@ pub struct Mesh {
     lighting: ([f32; 3], [f32; 3], [f32; 3]),
     color: [f32; 4],
     opacity: f32,
-    occlude: Option<[f32; 4]>,
 }
 
 impl Mesh {
@@ -294,7 +288,6 @@ impl Mesh {
             lighting: *lighting,
             color: style.0,
             opacity: style.1,
-            occlude: style.2,
         })
     }
 
@@ -310,24 +303,22 @@ impl Mesh {
         (low <= high).then_some((low, high))
     }
 
-    /// Map the depth keys to `[1/1024, 1 - 1/1024]` over `(low, high)`, so
-    /// that `0` stays free for "no opaque mesh" (see `depth`).
-    pub fn normalise(&mut self, (low, high): (f32, f32)) {
+    /// Normalise the depth keys over the frame's range (see
+    /// [`normalised_key`]).
+    pub fn normalise(&mut self, range: (f32, f32)) {
         let Some(keys) = &self.keys else { return };
-        let scale = (1.0 - 2.0 / 1024.0) / (high - low).max(f32::MIN_POSITIVE);
-        for (index, key) in keys.iter().enumerate() {
-            let depth = if key.is_finite() {
-                1.0 / 1024.0 + (key - low) * scale
-            } else {
-                0.0
-            };
-            self.vertices[index * STRIDE / 4 + 10] = depth;
+        for (index, &key) in keys.iter().enumerate() {
+            self.vertices[index * STRIDE / 4 + 10] = normalised_key(key, range);
         }
     }
 
-    /// The opaque triangles for the depth pass, in device pixels.
-    pub fn depth_vertices(&self, to_device: [f32; 4], out: &mut Vec<f32>) {
-        if !self.is_opaque() || self.keys.is_none() {
+    /// The triangles for the depth pass, in device pixels: those of an
+    /// opaque mesh, or of any visible mesh with `translucent` (a fully
+    /// transparent one hides nothing: ManimGL discards fragments of zero
+    /// alpha).
+    pub fn depth_vertices(&self, to_device: [f32; 4], translucent: bool, out: &mut Vec<f32>) {
+        let included = self.is_opaque() || (translucent && self.opacity > 0.0);
+        if !included || self.keys.is_none() {
             return;
         }
         for triangle in &self.triangles {
@@ -354,21 +345,20 @@ impl Mesh {
             .unwrap_or_else(|| skia_safe::shaders::color(skia_safe::Color::WHITE))
     }
 
-    /// Draw all triangles, or the listed pieces.  An opaque mesh draws
-    /// straight onto the canvas; a translucent one first clears what lies
-    /// under its depth pieces to the background, then draws in one layer
-    /// with its opacity, so that its own triangles do not show through each
-    /// other.
+    /// Draw the mesh, tested per pixel against the opaque depth image when
+    /// opaque and against the image of all meshes when translucent.
     pub fn draw(
         &self,
         canvas: &Canvas,
         context: &mut gpu::DirectContext,
         frame: &Frame,
-        pieces: Option<&[i64]>,
     ) -> PyResult<()> {
-        let mut data: Vec<f32> = Vec::new();
+        if self.triangles.is_empty() || self.opacity <= 0.0 {
+            return Ok(());
+        }
+        let mut data: Vec<f32> = Vec::with_capacity(self.triangles.len() * 3 * STRIDE / 4);
         let (mut low, mut high) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
-        let mut push = |triangle: &[u32; 3]| {
+        for triangle in &self.triangles {
             for &corner in triangle {
                 let start = corner as usize * STRIDE / 4;
                 data.extend_from_slice(&self.vertices[start..start + STRIDE / 4]);
@@ -376,104 +366,75 @@ impl Mesh {
                 low = [low[0].min(x), low[1].min(y)];
                 high = [high[0].max(x), high[1].max(y)];
             }
-        };
-        match pieces {
-            None => self.triangles.iter().for_each(&mut push),
-            Some(pieces) => pieces
-                .iter()
-                .filter_map(|&piece| self.triangles.get(piece as usize))
-                .for_each(&mut push),
-        }
-        if data.is_empty() {
-            return Ok(());
         }
         let bounds = Rect::new(low[0], low[1], high[0], high[1]);
         let bytes: Vec<u8> = data.iter().flat_map(|value| value.to_ne_bytes()).collect();
         let buffer = gpu::ganesh::meshes::make_vertex_buffer(context, &bytes)
             .ok_or_else(|| PyValueError::new_err("mesh vertex buffer failed"))?;
-        let count = data.len() / (STRIDE / 4);
+        let (depth, has_depth) = if self.is_opaque() {
+            (&frame.opaque_depth, frame.has_opaque)
+        } else {
+            (&frame.all_depth, frame.has_any)
+        };
         let children = [
             ChildPtr::from(Self::image_shader(&self.light)),
             ChildPtr::from(Self::image_shader(&self.dark)),
-            ChildPtr::from(frame.depth.clone()),
+            ChildPtr::from(depth.clone()),
         ];
-        let depth_test = self.keys.is_some() && frame.has_depth;
         let spec = frame
             .spec
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("mesh drawn without its shaders"))?;
-        let mesh = |mode: f32, fill: [f32; 4]| -> PyResult<SkMesh> {
-            let uniforms = frame.uniforms(spec, self, depth_test, mode, fill);
-            SkMesh::make(
-                spec.clone(),
-                mesh::Mode::Triangles,
-                buffer.clone(),
-                count,
-                0,
-                Data::new_copy(&uniforms),
-                &children,
-                bounds,
-            )
-            .map_err(|error| PyValueError::new_err(format!("mesh: {error}")))
-        };
-        let translucent = !self.is_opaque();
-        if let (true, Some(_), Some(occlude)) = (translucent, pieces, self.occlude) {
-            // Clear to the background what this surface hides behind it, as
-            // its depth would: erase, then paint the background colour.
-            let mut erase = Paint::default();
-            erase.set_blend_mode(BlendMode::DstOut);
-            canvas.draw_mesh(
-                &mesh(1.0, [0.0, 0.0, 0.0, 1.0])?,
-                Blender::mode(BlendMode::Dst),
-                &erase,
-            );
-            if occlude[3] > 0.0 {
-                let a = occlude[3];
-                let fill = [occlude[0] * a, occlude[1] * a, occlude[2] * a, a];
-                canvas.draw_mesh(
-                    &mesh(1.0, fill)?,
-                    Blender::mode(BlendMode::Dst),
-                    &Paint::default(),
-                );
-            }
-        }
-        if translucent {
-            canvas.save_layer_alpha(
-                None::<Rect>,
-                (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u32,
-            );
-        }
-        canvas.draw_mesh(
-            &mesh(0.0, [0.0; 4])?,
-            Blender::mode(BlendMode::Dst),
-            &Paint::default(),
-        );
-        if translucent {
-            canvas.restore();
-        }
+        let uniforms = frame.uniforms(spec, self, self.keys.is_some() && has_depth);
+        let mesh = SkMesh::make(
+            spec.clone(),
+            mesh::Mode::Triangles,
+            buffer,
+            data.len() / (STRIDE / 4),
+            0,
+            Data::new_copy(&uniforms),
+            &children,
+            bounds,
+        )
+        .map_err(|error| PyValueError::new_err(format!("mesh: {error}")))?;
+        // The paint is the blend's source and the mesh colour its
+        // destination: `Dst` keeps the mesh colour, drawn source-over.
+        canvas.draw_mesh(&mesh, Blender::mode(BlendMode::Dst), &Paint::default());
         Ok(())
     }
 }
 
-/// What every mesh of a display list shares.
+/// A depth key mapped to `[1/1024, 1 - 1/1024]` over the frame's mesh key
+/// range `(low, high)`, so that `0` stays free for "no mesh" in the depth
+/// images (see `depth`); a key outside the range lands outside that span,
+/// clamped to `[1/2048, 1]` (still in front of or behind every mesh), and a
+/// key that is not finite maps to `0`.
+pub fn normalised_key(key: f32, (low, high): (f32, f32)) -> f32 {
+    if !key.is_finite() {
+        return 0.0;
+    }
+    let scale = (1.0 - 2.0 / 1024.0) / (high - low).max(f32::MIN_POSITIVE);
+    (1.0 / 1024.0 + (key - low) * scale).clamp(1.0 / 2048.0, 1.0)
+}
+
+/// What every mesh and VMobject of a display list shares.
 pub struct Frame {
     /// The mesh shaders; present whenever the display list has meshes.
     pub spec: Option<MeshSpecification>,
-    /// The depth image as a shader in device pixels (unused when empty).
-    pub depth: Shader,
-    pub has_depth: bool,
+    /// The nearest opaque mesh per device pixel, as a shader (see `depth`).
+    pub opaque_depth: Shader,
+    pub has_opaque: bool,
+    /// The nearest mesh of any opacity per device pixel.
+    pub all_depth: Shader,
+    pub has_any: bool,
+    /// The depth key range the images are normalised over (see
+    /// `Mesh::normalise`), to normalise the keys of VMobject runs alike.
+    pub key_range: Option<(f32, f32)>,
     pub to_device: [f32; 4],
 }
 
 impl Frame {
-    fn uniforms(
-        &self,
-        spec: &MeshSpecification,
-        mesh: &Mesh,
-        depth_test: bool,
-        mode: f32,
-        fill: [f32; 4],
-    ) -> Vec<u8> {
+    fn uniforms(&self, spec: &MeshSpecification, mesh: &Mesh, depth_test: bool) -> Vec<u8> {
         let mut bytes = vec![0u8; spec.uniform_size()];
         let mut put = |name: &str, values: &[f32]| {
             if let Some(uniform) = spec.find_uniform(name) {
@@ -505,8 +466,7 @@ impl Frame {
             &mesh.dark.as_ref().map_or([1.0; 2], |(_, size)| *size),
         );
         put("depthTest", &[if depth_test { 1.0 } else { 0.0 }]);
-        put("mode", &[mode]);
-        put("fill", &fill);
+        put("opacity", &[mesh.opacity.clamp(0.0, 1.0)]);
         bytes
     }
 }
