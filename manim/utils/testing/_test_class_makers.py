@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from manim.renderer.cairo import CairoRenderer
+from manim.renderer.skia import SkiaRenderer
 from manim.scene.scene import Scene
 from manim.scene.scene_file_writer import SceneFileWriter, _SceneFileWriterSettings
 from manim.typing import PixelArray, StrPath
@@ -14,7 +14,7 @@ from ._frames_testers import _FramesTester
 def _make_test_scene_class(
     base_scene: type[Scene],
     construct_test: Callable[[Scene], None],
-    test_renderer: CairoRenderer | None,
+    test_renderer: SkiaRenderer | None,
 ) -> type[Scene]:
     # TODO: Get the type annotation right for the base_scene argument.
     class _TestedScene(base_scene):  # type: ignore[valid-type, misc]
@@ -46,6 +46,11 @@ class DummySceneFileWriter(SceneFileWriter):
     def __init__(self, settings: _SceneFileWriterSettings) -> None:
         super().__init__(settings)
         self.i = 0
+
+    @property
+    def accepts_yuv420(self) -> bool:
+        # The frames are compared as RGBA.
+        return False
 
     def add_partial_movie_file(self, hash_animation: str | None) -> None:
         pass

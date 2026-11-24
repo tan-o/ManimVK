@@ -62,6 +62,7 @@ def test_max_files_cached_uses_minus_one_for_unlimited(config):
 
 
 def test_tempconfig_restores_renderer(config):
+    config.renderer = "cairo"
     with tempconfig({"renderer": "vulkan"}):
         assert config.renderer == RendererType.VULKAN
         assert issubclass(Vector, VMobject)

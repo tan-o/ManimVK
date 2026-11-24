@@ -9,10 +9,9 @@ from manim import Animation, Manager, Scene, Square, Wait, tempconfig
 
 @pytest.fixture
 def scene():
-    # Playback and the clock live in Manager; the trace tests cover both backends.
+    # Playback and the clock live in Manager.
     with tempconfig(
         {
-            "renderer": "cairo",
             "format": "none",
             "live_preview": False,
             "pixel_width": 32,

@@ -1040,28 +1040,16 @@ class Mobject:
     def get_image(self, camera: Camera | None = None) -> Image.Image:
         """Draw this mobject and its submobjects and return a PIL image.
 
-        The renderer follows :attr:`manim.config.renderer`: Vulkan (the
-        default) uses the Skia/Ganesh target, while an explicit Cairo request
-        keeps the reference rasterizer. Pass a ``camera`` to select the view,
-        or omit it to create a default :class:`.Camera`. To use a scene's
-        current view, pass ``camera=scene.camera``.
+        Pass a ``camera`` to select the view, or omit it to create a default
+        :class:`.Camera`. To use a scene's current view, pass
+        ``camera=scene.camera``.
         """
         # Import here: the camera and renderer modules import this module.
         from manim.camera import Camera
-        from manim.constants import RendererType
+        from manim.renderer.skia.renderer import SkiaRenderer
 
         render_camera = Camera() if camera is None else camera
-        if config.renderer == RendererType.CAIRO:
-            from manim.renderer.cairo import CairoRenderer
-
-            renderer = CairoRenderer(camera=render_camera)
-        else:
-            # Vulkan is the default renderer.
-            from manim.renderer.skia.renderer import SkiaRenderer
-
-            renderer = SkiaRenderer(camera=render_camera)
-
-        with renderer:
+        with SkiaRenderer(camera=render_camera) as renderer:
             renderer.render_mobjects([self])
             return renderer.get_image()
 

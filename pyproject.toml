@@ -61,9 +61,6 @@ homepage = "https://www.manim.community/"
 "Discord" = "https://www.manim.community/discord/"
 
 [project.optional-dependencies]
-legacy = [
-    "pycairo>=1.14,<2.0.0",
-]
 jupyterlab = [
     "jupyterlab>=4.3.4",
     "notebook>=7.3.2",

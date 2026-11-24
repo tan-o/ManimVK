@@ -20,22 +20,42 @@ def _image(seed=0, shape=(6, 5, 4)):
     return ImageMobject(rng.integers(0, 255, shape, dtype=np.uint8))
 
 
-def test_pixel_array_is_read_only_and_keyed():
+def test_writing_into_pixel_array_changes_the_texture_key():
     image = _image()
-    assert not image.pixel_array.flags.writeable
-    with pytest.raises(ValueError):
-        image.pixel_array[0, 0, 0] = 1
+    key = image.texture_key
+    image.pixel_array[0, 0, 0] = 1
+    assert image.pixel_array[0, 0, 0] == 1
+    assert image.texture_key != key
+
+    # Through a view and an in-place operator, as Manim Community scripts do.
+    key = image.texture_key
+    alpha = image.pixel_array[:, :, 3]
+    alpha //= 2
+    assert image.texture_key != key
+
     key = image.texture_key
     image.pixel_array = np.zeros((6, 5, 4), dtype=np.uint8)
     assert image.texture_key != key
-    assert not image.pixel_array.flags.writeable
 
 
-def test_copies_share_pixels_and_texture():
+def test_reading_pixels_keeps_the_texture_key():
+    image = _image()
+    key = image.texture_key
+    _ = image.pixel_array * 2
+    image.set_opacity(0.5)
+    image.get_pixel_array()
+    assert image.texture_key == key
+
+
+def test_copies_have_their_own_pixels_and_share_the_texture_until_written():
     image = _image()
     copy = image.copy()
-    assert copy.pixel_array is image.pixel_array
+    assert copy.pixel_array is not image.pixel_array
+    np.testing.assert_array_equal(copy.pixel_array, image.pixel_array)
     assert copy.texture_key == image.texture_key
+    copy.pixel_array[0, 0] = 7
+    assert copy.texture_key != image.texture_key
+    assert not (image.pixel_array[0, 0] == 7).all()
 
 
 def test_opacity_is_applied_when_drawn():
@@ -67,7 +87,9 @@ def test_transform_between_images_mixes_them():
     assert pixels is second.pixel_array
     assert key == second.texture_key
     assert alpha == 0.3
-    expected = (0.7 * first.pixel_array + 0.3 * second.pixel_array).astype(np.uint8)
+    expected = (0.7 * first.pixel_array.view(np.ndarray) + 0.3 * second.pixel_array.view(np.ndarray)).astype(
+        np.uint8
+    )
     np.testing.assert_array_equal(moving.get_pixel_array(), expected)
     moving.interpolate_color(first, second, 1)
     assert moving.get_image_mix() is None

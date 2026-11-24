@@ -1,23 +1,46 @@
-"""Drawing context for the Skia-backed classic renderer."""
+"""Drawing mobjects into a :class:`~.SkiaRenderTarget` through one camera."""
 
 from __future__ import annotations
 
+import itertools as it
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any
 
 import manim_core
 import numpy as np
-
-from manim.mobject.sksl import SkSLMobject
-from manim.mobject.types.image_mobject import ImageMobjectFromCamera
-from manim.renderer.cairo.rendering import (
-    _CAP_STYLE_MAP,
-    _LINE_JOIN_MAP,
-    _CairoDrawingContext,
-)
-
 from PIL import Image
 
-# ImageMobject.resampling_algorithm to the native sampling: PIL's perspective
-# transform, which the Cairo renderer uses, knows nearest, bilinear and bicubic.
+from manim.constants import CapStyleType, LineJointType
+from manim.mobject.mobject import Mobject
+from manim.mobject.sksl import SkSLMobject
+from manim.mobject.three_d.mesh_surface import MeshSurface
+from manim.mobject.types.image_mobject import AbstractImageMobject, ImageMobjectFromCamera
+from manim.mobject.types.point_cloud_mobject import PMobject
+from manim.mobject.types.vectorized_mobject import VMobject
+
+from .target import SkiaRenderTarget
+
+if TYPE_CHECKING:
+    from manim.camera import Camera
+    from manim.typing import Point3D_Array
+
+# The native target's join and cap codes.
+_LINE_JOIN_MAP = {
+    LineJointType.AUTO: 0,
+    LineJointType.ROUND: 1,
+    LineJointType.BEVEL: 2,
+    LineJointType.MITER: 0,
+}
+
+_CAP_STYLE_MAP = {
+    CapStyleType.AUTO: 0,
+    CapStyleType.ROUND: 1,
+    CapStyleType.BUTT: 0,
+    CapStyleType.SQUARE: 2,
+}
+
+# ImageMobject.resampling_algorithm to the native sampling: nearest, bilinear
+# or bicubic (Catmull-Rom).
 _SAMPLING = {
     Image.Resampling.NEAREST: 0,
     Image.Resampling.BOX: 1,
@@ -34,28 +57,26 @@ _SAMPLING = {
 # as a vertical line.
 _COORDINATE_LIMIT = 1e5
 
+_ImageResolver = Callable[[ImageMobjectFromCamera], "SkiaRenderTarget | np.ndarray | None"]
 
 
-class SkiaDrawingContext(_CairoDrawingContext):
-    """Cairo-compatible drawing semantics implemented with Skia paths."""
+class SkiaDrawingContext:
+    """Draw mobjects into one renderer-owned target using one camera."""
+
+    def __init__(self, *, camera: Camera, target: SkiaRenderTarget, image_resolver: _ImageResolver) -> None:
+        self.camera = camera
+        self.target = target
+        self.image_resolver = image_resolver
 
     def draw(
         self,
-        mobjects,
+        mobjects: Iterable[Mobject],
         *,
         include_submobjects: bool = True,
-        excluded_mobjects=None,
+        excluded_mobjects: list[Mobject] | None = None,
     ) -> None:
-        import itertools as it
-
-        from manim.mobject.mobject import Mobject
-        from manim.mobject.three_d.mesh_surface import MeshSurface
-        from manim.mobject.types.image_mobject import AbstractImageMobject
-        from manim.mobject.types.point_cloud_mobject import PMobject
-        from manim.mobject.types.vectorized_mobject import VMobject
-
         self.target._ensure_open()
-        display_funcs = {
+        display_funcs: dict[type[Mobject], Callable[[list[Any]], None]] = {
             SkSLMobject: self._display_sksl_mobjects,
             VMobject: self._display_vectorized_items,
             MeshSurface: self._display_mesh_surfaces,
@@ -66,7 +87,7 @@ class SkiaDrawingContext(_CairoDrawingContext):
         }
         takes_items = {VMobject, MeshSurface}
 
-        def type_or_raise(item):
+        def type_or_raise(item) -> type[Mobject]:
             for mobject_type in display_funcs:
                 if isinstance(item[0], mobject_type):
                     return mobject_type
@@ -75,13 +96,9 @@ class SkiaDrawingContext(_CairoDrawingContext):
             )
 
         mobjects = list(mobjects)
-        roots = {
-            id(member): index
-            for index, root in enumerate(mobjects)
-            for member in root.get_family()
-        }
-        self._subpath_tables = {}
-        self._vertex_layers = {}
+        roots = {id(member): index for index, root in enumerate(mobjects) for member in root.get_family()}
+        self._subpath_tables: dict[int, tuple] = {}
+        self._vertex_layers: dict[int, tuple] = {}
         with self.camera._drawing():
             to_display = self.camera.get_mobjects_to_display(
                 mobjects,
@@ -96,8 +113,10 @@ class SkiaDrawingContext(_CairoDrawingContext):
                 else:
                     display_funcs[group_type]([mobject for mobject, _ in group])
 
+    # -- vectorized mobjects ---------------------------------------------
+
     def _display_vectorized_items(self, items) -> None:
-        """Draw whole VMobjects in batches and depth pieces one run at a time."""
+        """Draw whole VMobjects in runs and depth pieces one at a time."""
         whole = []
         for vmobject, pieces in items:
             if pieces is None:
@@ -108,7 +127,37 @@ class SkiaDrawingContext(_CairoDrawingContext):
             self._display_vmobject_pieces(vmobject, pieces)
         self._display_vectorized_mobjects(whole)
 
-    def _subpath_table(self, vmobject):
+    def _display_vectorized_mobjects(self, vmobjects: list[VMobject]) -> None:
+        for image, run in it.groupby(vmobjects, lambda vmobject: vmobject.get_background_image()):
+            if image:
+                self._display_background_colored_vmobjects(image, list(run))
+            else:
+                context = self.target.get_context(self.camera)
+                for vmobject in run:
+                    self._set_path(context, vmobject)
+                    self._paint(context, vmobject)
+
+    def _paint(self, context, vmobject: VMobject) -> None:
+        """Background stroke, fill, then stroke, on the current path."""
+        self._apply_stroke(context, vmobject, background=True)
+        self._apply_fill(context, vmobject)
+        self._apply_stroke(context, vmobject)
+
+    def _set_path(self, context, vmobject: VMobject) -> None:
+        """Send a VMobject's whole path in one native call; manim_core splits
+        it into subpaths and finds the closed ones.
+        """
+        points = self.camera.transform_points_pre_display(vmobject, vmobject.points)
+        points, subpaths = manim_core.cubic_subpaths(
+            points,
+            vmobject.n_points_per_cubic_curve,
+            2,
+            vmobject.tolerance_for_point_equality,
+            _COORDINATE_LIMIT,
+        )
+        context.set_cubic_path(points, subpaths)
+
+    def _subpath_table(self, vmobject: VMobject):
         """Projected points and (start, end, closed) per subpath, once per frame.
 
         Subpaths are split on the 3D points, as in
@@ -133,22 +182,82 @@ class SkiaDrawingContext(_CairoDrawingContext):
             starts, ends = split[:, 0], split[:, 1]
             first, last = points[starts, :2], points[ends - 1, :2]
             tolerance = vmobject.tolerance_for_point_equality
-            closed = np.all(
-                np.abs(first - last) <= tolerance + 1e-5 * np.abs(last), axis=1
-            )
-            table = list(zip(starts.tolist(), ends.tolist(), closed.tolist()))
+            closed = np.all(np.abs(first - last) <= tolerance + 1e-5 * np.abs(last), axis=1)
+            table = list(zip(starts.tolist(), ends.tolist(), closed.tolist(), strict=True))
         self._subpath_tables[key] = (vmobject, points, table)
         return points, table
 
-    def _display_vmobject_pieces(self, vmobject, pieces) -> None:
+    def _display_vmobject_pieces(self, vmobject: VMobject, pieces) -> None:
         points, table = self._subpath_table(vmobject)
         if not table:
             return
         context = self.target.get_context(self.camera)
         context.set_cubic_path(points, [table[index] for index in pieces.tolist()])
-        self._apply_stroke(context, vmobject, background=True)
-        self._apply_fill(context, vmobject)
-        self._apply_stroke(context, vmobject)
+        self._paint(context, vmobject)
+
+    def _set_source(self, context, rgbas, vmobject: VMobject) -> None:
+        if len(rgbas) == 1:
+            # Manim stores straight RGBA, as set_source_rgba takes it.
+            context.set_source_rgba(*rgbas[0])
+            return
+        points = vmobject.get_gradient_start_and_end_points()
+        points = self.camera.transform_points_pre_display(vmobject, points)
+        stops = [
+            (offset, rgba[0], rgba[1], rgba[2], rgba[3])
+            for rgba, offset in zip(rgbas, np.linspace(0, 1, len(rgbas)), strict=True)
+        ]
+        context.set_source_linear_gradient(points[0][0], points[0][1], points[1][0], points[1][1], stops)
+
+    def _apply_fill(self, context, vmobject: VMobject) -> None:
+        rgbas = self.camera.get_fill_rgbas(vmobject)
+        if not np.any(rgbas[:, 3]):
+            # A transparent fill draws nothing; skip tessellating the path.
+            return
+        self._set_source(context, rgbas, vmobject)
+        context.fill_preserve()
+
+    def _set_stroke_style(self, context, vmobject: VMobject, width: float) -> None:
+        context.set_line_width(width * self.target.settings.line_width_multiple)
+        context.set_line_join(_LINE_JOIN_MAP[vmobject.joint_type])
+        context.set_line_cap(_CAP_STYLE_MAP[vmobject.cap_style])
+
+    def _apply_stroke(self, context, vmobject: VMobject, background: bool = False) -> None:
+        width = vmobject.get_stroke_width(background)
+        if width == 0:
+            return
+        self._set_source(context, self.camera.get_stroke_rgbas(vmobject, background=background), vmobject)
+        self._set_stroke_style(context, vmobject, width)
+        context.stroke_preserve()
+
+    def _display_background_colored_vmobjects(self, image, vmobjects: list[VMobject]) -> None:
+        """Draw vmobjects coloured by a background image: each fill and stroke
+        paints with the image, faded by the opacity it would have.
+        """
+        background = self.target.get_background_image(image)
+        batch = self.target.new_image_batch()
+        context = self.target.get_context(self.camera)
+        for vmobject in vmobjects:
+            self._set_path(context, vmobject)
+            for kind in ("background_stroke", "fill", "stroke"):
+                if kind == "fill":
+                    rgbas = self.camera.get_fill_rgbas(vmobject)
+                    width = None
+                else:
+                    background_stroke = kind == "background_stroke"
+                    width = vmobject.get_stroke_width(background_stroke)
+                    if width == 0:
+                        continue
+                    rgbas = self.camera.get_stroke_rgbas(vmobject, background=background_stroke)
+                if not np.any(rgbas[:, 3]):
+                    continue
+                self.target.set_source_image(background, (1.0, 1.0, 1.0, float(rgbas[:, 3].mean())), batch)
+                if width is None:
+                    context.fill_preserve()
+                else:
+                    self._set_stroke_style(context, vmobject, width)
+                    context.stroke_preserve()
+
+    # -- meshes, SkSL, point clouds and images ------------------------------
 
     def _display_mesh_surfaces(self, items) -> None:
         for surface, pieces in items:
@@ -169,14 +278,12 @@ class SkiaDrawingContext(_CairoDrawingContext):
             if pieces is not None and surface.get_opacity() < 1:
                 occlude = tuple(
                     float(c)
-                    for c in self.camera.background_color.to_rgba_with_alpha(
-                        self.camera.background_opacity
-                    )
+                    for c in self.camera.background_color.to_rgba_with_alpha(self.camera.background_opacity)
                 )
             self.target.get_context(self.camera)
-            texture, key = surface.get_texture_atlas()
+            texture, texture_key = surface.get_texture_atlas()
             self.target.draw_textured_mesh(
-                key,
+                texture_key,
                 texture,
                 np.ascontiguousarray(positions[:, :2], dtype=np.float32),
                 np.ascontiguousarray(uvs, dtype=np.float32),
@@ -185,163 +292,62 @@ class SkiaDrawingContext(_CairoDrawingContext):
                 occlude,
             )
 
-    def _display_sksl_mobjects(self, mobjects) -> None:
+    def _display_sksl_mobjects(self, mobjects: list[SkSLMobject]) -> None:
         for mobject in mobjects:
             coords = self._points_to_subpixel_coords(mobject, mobject.points)
-            quad = [
-                (float(coords[0][0]), float(coords[0][1])),
-                (float(coords[1][0]), float(coords[1][1])),
-                (float(coords[2][0]), float(coords[2][1])),
-                (float(coords[3][0]), float(coords[3][1])),
-            ]
+            quad = [(float(x), float(y)) for x, y in coords[:4]]
             self.target.draw_sksl_quad(mobject.source, mobject.uniforms, quad)
 
-    def _set_cairo_context_path(self, context, vmobject) -> None:
-        """Send a VMobject's whole path to Skia in one native call.
-
-        manim_core splits it into subpaths and decides which are closed with
-        the Cairo renderer's rules, in one call.
-        """
-        points = self.camera.transform_points_pre_display(vmobject, vmobject.points)
-        points, subpaths = manim_core.cubic_subpaths(
-            points,
-            vmobject.n_points_per_cubic_curve,
-            2,
-            vmobject.tolerance_for_point_equality,
-            _COORDINATE_LIMIT,
-        )
-        context.set_cubic_path(points, subpaths)
-
-    def _set_cairo_context_color(self, context, rgbas, vmobject) -> None:
-        if len(rgbas) == 1:
-            # Manim stores straight RGBA, matching Skia's set_source_rgba.
-            context.set_source_rgba(*rgbas[0])
-            return
-
-        points = vmobject.get_gradient_start_and_end_points()
-        points = self.camera.transform_points_pre_display(vmobject, points)
-        stops = [
-            (offset, rgba[0], rgba[1], rgba[2], rgba[3])
-            for rgba, offset in zip(
-                rgbas,
-                np.linspace(0, 1, len(rgbas)),
-                strict=True,
-            )
-        ]
-        context.set_source_linear_gradient(
-            points[0][0],
-            points[0][1],
-            points[1][0],
-            points[1][1],
-            stops,
-        )
-
-    def _apply_fill(self, context, vmobject) -> None:
-        rgbas = self.camera.get_fill_rgbas(vmobject)
-        if not np.any(rgbas[:, 3]):
-            # A transparent fill draws nothing; skip tessellating the path.
-            return
-        self._set_cairo_context_color(context, rgbas, vmobject)
-        context.fill_preserve()
-
-    def _apply_stroke(self, context, vmobject, background: bool = False) -> None:
-        width = vmobject.get_stroke_width(background)
-        if width == 0:
-            return
-        self._set_cairo_context_color(
-            context,
-            self.camera.get_stroke_rgbas(vmobject, background=background),
-            vmobject,
-        )
-        context.set_line_width(
-            width * self.target.settings.cairo_line_width_multiple,
-        )
-        context.set_line_join(int(_LINE_JOIN_MAP[vmobject.joint_type]))
-        context.set_line_cap(int(_CAP_STYLE_MAP[vmobject.cap_style]))
-        context.stroke_preserve()
-
-    def _display_non_background_colored_vmobjects(self, vmobjects) -> None:
-        # The whole batch is drawn on the GPU.  Do not read it back here:
-        # read_pixels() commits once at the end of the frame.  The old eager
-        # commit made vector-only scenes pay two full GPU-to-CPU copies.
-        super()._display_non_background_colored_vmobjects(vmobjects)
-
-    def _display_background_colored_vmobjects(self, image, vmobjects) -> None:
-        """Draw vmobjects coloured by a background image.
-
-        Cairo draws them into a scratch target and uses its alpha as a mask
-        on the image; here each fill and stroke paints with the image, faded
-        by the opacity it would have, so the same coverage shows the image.
-        """
-        if not vmobjects:
-            return
-        background = self.target.get_background_image(image)
-        batch = self.target.new_image_batch()
-        context = self.target.get_context(self.camera)
-        for vmobject in vmobjects:
-            self._set_cairo_context_path(context, vmobject)
-            for kind in ("background_stroke", "fill", "stroke"):
-                if kind == "fill":
-                    rgbas = self.camera.get_fill_rgbas(vmobject)
-                    width = None
-                else:
-                    background_stroke = kind == "background_stroke"
-                    width = vmobject.get_stroke_width(background_stroke)
-                    if width == 0:
-                        continue
-                    rgbas = self.camera.get_stroke_rgbas(vmobject, background=background_stroke)
-                if not np.any(rgbas[:, 3]):
-                    continue
-                self.target.set_source_image(
-                    background, (1.0, 1.0, 1.0, float(rgbas[:, 3].mean())), batch
-                )
-                if width is None:
-                    context.fill_preserve()
-                else:
-                    context.set_line_width(width * self.target.settings.cairo_line_width_multiple)
-                    context.set_line_join(int(_LINE_JOIN_MAP[vmobject.joint_type]))
-                    context.set_line_cap(int(_CAP_STYLE_MAP[vmobject.cap_style]))
-                    context.stroke_preserve()
-
-    def _display_point_cloud_mobjects(self, pmobjects) -> None:
+    def _display_point_cloud_mobjects(self, pmobjects: list[PMobject]) -> None:
         for pmobject in pmobjects:
-            self._draw_point_cloud_native(pmobject)
+            self._display_point_cloud(pmobject)
 
-    def _draw_point_cloud_native(self, pmobject) -> None:
-        """Draw each point as the square block of pixels the Cairo renderer sets."""
+    def _display_point_cloud(self, pmobject: PMobject) -> None:
+        """Draw each point as a square block of ``stroke_width`` device pixels."""
         points = pmobject.points
         if len(points) == 0:
             return
         rgbas = np.asarray(pmobject.rgbas, dtype=np.float64).reshape(-1, 4)
         if len(rgbas) == 0:
             return
-        pixel_coords = self._points_to_pixel_coords(pmobject, points)
-        # Cairo sets pixels x + k for k in range(-t // 2 + 1, t // 2 + 1).
+        pixel_coords = self._points_to_subpixel_coords(pmobject, points).astype(np.int64)
+        # The block covers pixels x + k for k in range(-size // 2 + 1, size // 2 + 1).
         size = max(1, int(self._adjusted_thickness(pmobject.stroke_width)))
         low, high = -size // 2 + 1, size // 2 + 1
         centers = pixel_coords + (low + high) / 2
         int_rgbas = (255 * rgbas).astype(np.uint8)
         if len(int_rgbas) != len(centers):
             int_rgbas = np.resize(int_rgbas, (len(centers), 4))
-        on_screen = self._on_screen_pixels(pixel_coords)
+        settings = self.target.settings
+        on_screen = (
+            (pixel_coords[:, 0] >= 0)
+            & (pixel_coords[:, 0] < settings.pixel_width)
+            & (pixel_coords[:, 1] >= 0)
+            & (pixel_coords[:, 1] < settings.pixel_height)
+        )
         entries = [
             (float(x), float(y), int(r), int(g), int(b), int(a))
             for (x, y), (r, g, b, a) in zip(centers[on_screen], int_rgbas[on_screen], strict=True)
         ]
         self.target.draw_point_pixels(entries, size / 2)
 
-    def _display_image_mobjects(self, image_mobjects) -> None:
-        for image_mobject in image_mobjects:
-            self._draw_image_mobject_native(image_mobject)
+    def _adjusted_thickness(self, thickness: float) -> float:
+        """A point size in pixels, scaled with the target from its base size."""
+        settings = self.target.settings
+        base_sum = settings.base_pixel_height + settings.base_pixel_width
+        target_sum = settings.pixel_height + settings.pixel_width
+        return 1 + (thickness - 1) * base_sum / target_sum
 
-    def _draw_image_mobject_native(self, image_mobject) -> None:
+    def _display_image_mobjects(self, image_mobjects: list[AbstractImageMobject]) -> None:
+        for image_mobject in image_mobjects:
+            self._display_image_mobject(image_mobject)
+
+    def _display_image_mobject(self, image_mobject: AbstractImageMobject) -> None:
         target_coords = self._points_to_subpixel_coords(image_mobject, image_mobject.points)
         # ImageMobject points are top-left, top-right, bottom-left, bottom-right.
         quad = [(float(x), float(y)) for x, y in target_coords[[0, 1, 3, 2]]]
         sampling = _SAMPLING.get(image_mobject.resampling_algorithm, 2)
         if isinstance(image_mobject, ImageMobjectFromCamera):
-            from manim.renderer.skia.target import SkiaRenderTarget
-
             source = self.image_resolver(image_mobject)
             if isinstance(source, SkiaRenderTarget):
                 self.target.draw_target_quad(source, quad, 1.0)
@@ -362,3 +368,17 @@ class SkiaDrawingContext(_CairoDrawingContext):
             sampling,
             mix,
         )
+
+    def _points_to_subpixel_coords(self, mobject: Mobject, points: Point3D_Array) -> np.ndarray:
+        """Device-pixel coordinates of ``points``, with the canvas matrix's view
+        center (ThreeDCamera.project_points() has already removed frame_center).
+        """
+        points = self.camera.transform_points_pre_display(mobject, points)
+        shifted_points = points - self.camera.get_view_transform_center()
+        settings = self.target.settings
+        result = np.zeros((len(points), 2))
+        result[:, 0] = shifted_points[:, 0] * settings.pixel_width / self.camera.frame_width + settings.pixel_width / 2
+        result[:, 1] = (
+            -shifted_points[:, 1] * settings.pixel_height / self.camera.frame_height + settings.pixel_height / 2
+        )
+        return result

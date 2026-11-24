@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from manim.camera import Camera
-from manim.renderer.cairo.target import _CairoRasterSettings
+from manim.renderer.skia.target import _ImageFiles, _RasterSettings
 from manim.renderer.skia.target import SkiaRenderTarget
 
 
@@ -34,14 +34,14 @@ class _RecordingDevice:
 
 
 def test_camera_center_maps_to_pixel_center_with_negative_y_scale() -> None:
-    settings = _CairoRasterSettings(
+    settings = _RasterSettings(
         pixel_width=854,
         pixel_height=480,
         base_pixel_width=854,
         base_pixel_height=480,
     )
     camera = Camera(frame_center=np.array([0.0, -2.97, 0.0]))
-    target = SkiaRenderTarget(settings, device=_RecordingDevice())
+    target = SkiaRenderTarget(settings, _ImageFiles(), device=_RecordingDevice())
     target.get_context(camera)
     sx, sy, tx, ty = target._native.matrix
 

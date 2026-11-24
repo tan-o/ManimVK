@@ -122,12 +122,3 @@ if "IPython" in _sys.modules:
 from .plugins import *
 
 
-def __getattr__(name: str):
-    # Keep the reference Cairo backend importable without paying for pycairo
-    # during a normal Vulkan/Skia import.
-    if name == "CairoRenderer":
-        from .renderer.cairo import CairoRenderer
-
-        globals()[name] = CairoRenderer
-        return CairoRenderer
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

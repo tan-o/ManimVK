@@ -8,7 +8,7 @@ Sources:
 Writes ``<out>/scenes/<id>.py`` (one scene each, with ``from manim import *``)
 and ``<out>/scenes.json``::
 
-    python tools/golden/collect.py --out golden
+    python tools/scenes/collect.py --out scenes
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def example_scene_names(path: Path) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--out", type=Path, default=Path("golden"))
+    parser.add_argument("--out", type=Path, default=Path("scenes"))
     args = parser.parse_args()
     scene_dir = args.out / "scenes"
     scene_dir.mkdir(parents=True, exist_ok=True)

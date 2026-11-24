@@ -4,14 +4,14 @@ import logging
 import sys
 from pathlib import Path
 
-import cairo
+import manim_vk
 import pytest
 
 import manim
 
 
 def pytest_report_header(config):
-    return f"\nCairo Version: {cairo.cairo_version()}"
+    return f"\nmanim_vk {manim_vk.__version__} (interface {manim_vk.API_VERSION})"
 
 
 def pytest_addoption(parser):
@@ -74,7 +74,6 @@ def manim_caplog(caplog):
 @pytest.fixture
 def config():
     saved = manim.config.copy()
-    manim.config.renderer = "cairo"
     # we need to return the actual config so that tests
     # using tempconfig pass
     yield manim.config

@@ -4,10 +4,9 @@ import os
 import subprocess
 import sys
 
-import pytest
 
 
-def render(tmp_path, backend, source, *selection, output="png"):
+def render(tmp_path, source, *selection, output="png"):
     script = tmp_path / "scene.py"
     script.write_text(source, encoding="utf-8")
     return subprocess.run(
@@ -15,8 +14,6 @@ def render(tmp_path, backend, source, *selection, output="png"):
             sys.executable,
             "-m",
             "manim",
-            "--renderer",
-            backend,
             "--format",
             output,
             "-r",
@@ -38,16 +35,14 @@ def render(tmp_path, backend, source, *selection, output="png"):
     )
 
 
-@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
-def test_scenes_rendered_in_one_run_do_not_share_state(tmp_path, backend):
+def test_scenes_rendered_in_one_run_do_not_share_state(tmp_path):
     result = render(
         tmp_path,
-        backend,
-        """from manim import RIGHT, RendererType, Scene, Square, config
+        """from manim import RIGHT, Scene, Square
 class First(Scene):
     def construct(self):
         assert self.time == 0
-        frame = self.camera.frame if config.renderer == RendererType.CAIRO else self.camera
+        frame = self.camera
         assert frame.get_center()[0] == 0
         frame.shift(RIGHT)
         self.add(Square())
@@ -65,7 +60,6 @@ class Second(First):
 def test_failed_constructor_play_does_not_strand_encoder(tmp_path):
     result = render(
         tmp_path,
-        "cairo",
         """from manim import Animation, Scene, Square
 class BrokenAnimation(Animation):
     def interpolate_mobject(self, alpha):

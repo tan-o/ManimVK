@@ -38,7 +38,6 @@ WRITE_BASELINES = os.environ.get("MANIM_VULKAN_BASELINE") == "1"
 
 def _vulkan_config(media_dir: Path) -> dict:
     return {
-        "renderer": "vulkan",
         "pixel_width": 320,
         "pixel_height": 180,
         "frame_rate": 10,

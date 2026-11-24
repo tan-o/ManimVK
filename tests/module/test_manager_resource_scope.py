@@ -10,11 +10,10 @@ from manim.manager import _State
 from manim.renderer.protocol import RendererState
 
 
-@pytest.fixture(params=["cairo", "vulkan"])
+@pytest.fixture
 def managed_scene(request, tmp_path):
     with tempconfig(
         {
-            "renderer": request.param,
             "format": "none",
             "live_preview": False,
             "pixel_width": 64,

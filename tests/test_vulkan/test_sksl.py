@@ -22,7 +22,6 @@ half4 main(float2 fragCoord) {
 def test_sksl_effect_renders_and_invalid_source_raises():
     with tempconfig(
         {
-            "renderer": "vulkan",
             "pixel_width": 64,
             "pixel_height": 36,
             "format": "none",

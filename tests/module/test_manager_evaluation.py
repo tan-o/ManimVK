@@ -51,11 +51,10 @@ class TraceScene(Scene):
         self.trace.append(("teardown", self.time))
 
 
-@pytest.fixture(params=["cairo", "vulkan"])
+@pytest.fixture
 def settings(request, tmp_path):
     with tempconfig(
         {
-            "renderer": request.param,
             "format": "none",
             "frame_rate": 4,
             "pixel_width": 32,
@@ -261,7 +260,6 @@ def test_camera_queries_match_a_render(tmp_path):
 
     with tempconfig(
         {
-            "renderer": "cairo",
             "format": "none",
             "frame_rate": 4,
             "pixel_width": 32,

@@ -21,7 +21,6 @@ from manim import (
     VGroup,
     tempconfig,
 )
-from manim.renderer.cairo.rendering import _CairoDrawingContext
 from manim.renderer.skia import renderer as skia_renderer
 from manim.renderer.skia.rendering import SkiaDrawingContext
 
@@ -97,7 +96,6 @@ class _Moving(Scene):
 def test_static_layer_is_captured_once_per_play_and_never_uploaded(calls, tmp_path):
     with tempconfig(
         {
-            "renderer": "vulkan",
             "frame_rate": 10,
             "pixel_width": 160,
             "pixel_height": 90,
@@ -148,23 +146,43 @@ class _OpRecorder:
                 self.ops.append(("Z",))
 
 
+def _reference_path_ops(recorder: _OpRecorder, camera, vmobject) -> None:
+    """The path a VMobject describes, segment by segment: the loop the Cairo
+    renderer drew with, kept as the reference for manim_core.cubic_subpaths.
+    """
+    recorder.new_path()
+    points = camera.transform_points_pre_display(vmobject, vmobject.points)
+    if len(points) == 0:
+        return
+    nppcc = vmobject.n_points_per_cubic_curve
+    for start, end in vmobject.get_subpath_split_indices_from_points(points, n_dims=2):
+        start, end = int(start), int(end)
+        if end - start < nppcc:
+            continue
+        recorder.new_sub_path()
+        recorder.move_to(*points[start, :2])
+        for index in range(start, end - nppcc + 1, nppcc):
+            recorder.curve_to(*points[index + 1 : index + 4, :2].ravel())
+        if vmobject.consider_points_equals_2d(points[start], points[end - 1]):
+            recorder.close_path()
+
+
 @pytest.mark.parametrize(
     "mobject",
     [Circle(), Square(), Vector([1, 2, 0]), Circle().pointwise_become_partial(Circle(), 0.1, 0.6)],
 )
-def test_batched_path_matches_cairo_path(mobject):
+def test_one_path_call_describes_the_reference_path(mobject):
     from manim.camera import Camera
 
     camera = Camera()
     for vmobject in mobject.family_members_with_points():
-        cairo_ops, skia_ops = _OpRecorder(), _OpRecorder()
-        cairo_context = object.__new__(_CairoDrawingContext)
+        reference_ops, skia_ops = _OpRecorder(), _OpRecorder()
         skia_context = object.__new__(SkiaDrawingContext)
-        cairo_context.camera = skia_context.camera = camera
-        _CairoDrawingContext._set_cairo_context_path(cairo_context, cairo_ops, vmobject)
-        SkiaDrawingContext._set_cairo_context_path(skia_context, skia_ops, vmobject)
-        assert len(cairo_ops.ops) == len(skia_ops.ops)
-        for a, b in zip(cairo_ops.ops, skia_ops.ops):
+        skia_context.camera = camera
+        _reference_path_ops(reference_ops, camera, vmobject)
+        SkiaDrawingContext._set_path(skia_context, skia_ops, vmobject)
+        assert len(reference_ops.ops) == len(skia_ops.ops)
+        for a, b in zip(reference_ops.ops, skia_ops.ops, strict=True):
             assert a[0] == b[0]
             np.testing.assert_allclose(a[1:], b[1:])
 
@@ -198,7 +216,6 @@ def test_image_animations_reuse_their_textures(monkeypatch, tmp_path):
     monkeypatch.setattr(skia_renderer.manim_vk, "Device", _ImageDevice)
     with tempconfig(
         {
-            "renderer": "vulkan",
             "frame_rate": 10,
             "pixel_width": 160,
             "pixel_height": 90,
@@ -209,11 +226,11 @@ def test_image_animations_reuse_their_textures(monkeypatch, tmp_path):
         scene = _ImageFades()
         scene.render()
     draws = _ImageCalls.draws
-    # One source array, under one key, is drawn for the whole fade: only the
+    # One source, under one key, is drawn for the whole fade: only the
     # opacity changes.  The transform draws the two sources with a weight.
     fade = [d for d in draws if d[3] is None and d[2] < 1]
     assert len(fade) >= 5
-    assert len({(key, array) for key, array, _, _ in fade}) == 1
+    assert len({key for key, _, _, _ in fade}) == 1
     assert [d[2] for d in fade] == sorted(d[2] for d in fade)
     mixes = [d for d in draws if d[3] is not None]
     assert len(mixes) >= 5

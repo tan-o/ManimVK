@@ -80,13 +80,13 @@ Manim also ships with a `%%manim` IPython magic which allows to use it convenien
 
 ## Vulkan backend
 
-This fork renders through Skia's Ganesh backend on Vulkan. The OpenGL renderer
-and its `OpenGL*` mobject family are removed; Cairo is not required for normal
-rendering or import.
+This fork renders through Skia's Ganesh backend on Vulkan, its only renderer.
+Scene scripts written for Manim Community run unchanged; the OpenGL renderer,
+its `OpenGL*` mobject family and the GLSL `Shader`/`Mesh` API are removed, and
+custom effects use `SkSLMobject`.
 
-- `--renderer vulkan` is the default.
-- `--renderer cairo` selects Cairo as an explicit reference backend; install the
-  optional dependencies with `pip install manim[legacy]`.
+- `--renderer` and `config.renderer` still accept `cairo` and `vulkan`, as Manim
+  Community scripts and configs use them; both draw with Skia/Vulkan.
 - Select an adapter with a case-insensitive name substring:
   `set MANIM_VK_DEVICE=RTX 3050` (Windows) or
   `export MANIM_VK_DEVICE=RTX 3050` (Linux/macOS).

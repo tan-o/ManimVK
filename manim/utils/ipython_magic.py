@@ -10,7 +10,6 @@ from typing import Any
 
 from manim import config, logger, tempconfig
 
-from ..constants import RendererType
 
 __all__ = ["ManimMagic"]
 
@@ -133,12 +132,9 @@ else:
             with tempconfig(local_ns.get("config", {})):
                 config.digest_args(args)
 
-                renderer = None
-                if config.renderer == RendererType.VULKAN:
-                    from manim.renderer.skia import SkiaRenderer
+                from manim.renderer.skia import SkiaRenderer
 
-                    renderer = SkiaRenderer()
-
+                renderer = SkiaRenderer()
                 try:
                     SceneClass = local_ns[config["scene_names"][0]]
                     scene = SceneClass(renderer=renderer)
@@ -146,7 +142,7 @@ else:
                 finally:
                     # Close the preview window here instead of waiting for the main thread to
                     # finish causing the window to stay open and freeze
-                    if renderer is not None and renderer.window is not None:
+                    if renderer.window is not None:
                         renderer.window.close()
 
                 output_file = getattr(

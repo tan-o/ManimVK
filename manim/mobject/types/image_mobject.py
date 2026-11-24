@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["AbstractImageMobject", "ImageMobject", "ImageMobjectFromCamera"]
 
 import pathlib
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -31,6 +32,54 @@ from ...utils.images import (
 )
 
 __all__ = ["ImageMobject", "ImageMobjectFromCamera"]
+
+
+class _PixelArray(np.ndarray):
+    """The pixels of an :class:`ImageMobject`, writable as in Manim Community.
+
+    Writing through it, or through a view of it, by index or with an in-place
+    operator, gives the image a new texture key, so the renderer uploads the
+    new pixels.  ``np.copyto`` and ``out=`` arguments write without telling
+    it: assign ``pixel_array`` after using them.
+    """
+
+    _owner: weakref.ref[ImageMobject] | None = None
+
+    def __array_finalize__(self, obj: Any) -> None:
+        # Views write into the image's memory; new arrays computed from it do not.
+        self._owner = getattr(obj, "_owner", None) if _memory(self) is _memory(obj) else None
+
+    def _written(self) -> None:
+        owner = self._owner() if self._owner is not None else None
+        if owner is not None:
+            owner.texture_key = new_texture_key()
+
+
+def _memory(array: Any) -> Any:
+    """The array that owns ``array``'s memory."""
+    while isinstance(getattr(array, "base", None), np.ndarray):
+        array = array.base
+    return array
+
+
+def _tracked(name: str):
+    method = getattr(np.ndarray, name)
+
+    def tracked(self: _PixelArray, *args: Any, **kwargs: Any) -> Any:
+        result = method(self, *args, **kwargs)
+        self._written()
+        return result
+
+    tracked.__name__ = name
+    return tracked
+
+
+for _name in (
+    "__setitem__", "__iadd__", "__isub__", "__imul__", "__itruediv__", "__ifloordiv__",
+    "__imod__", "__ipow__", "__iand__", "__ior__", "__ixor__", "__ilshift__", "__irshift__",
+    "__imatmul__", "fill", "put", "sort", "partition", "byteswap",
+):  # fmt: skip
+    setattr(_PixelArray, _name, _tracked(_name))
 
 if TYPE_CHECKING:
     from typing import Self
@@ -216,33 +265,40 @@ class ImageMobject(AbstractImageMobject):
 
     @property
     def pixel_array(self) -> PixelArray:
-        """The source pixels, read-only.
+        """The source pixels.
 
-        Assigning an array replaces the image (and its GPU texture).  Opacity
-        and a transform into another image are kept apart from the source and
-        applied when the image is drawn; :meth:`get_pixel_array` returns the
-        pixels with them applied.
+        Assigning an array replaces the image; writing into this one changes
+        it (see :class:`_PixelArray`).  Either way the image takes a new
+        texture key, the name of its GPU texture.  Opacity and a transform into
+        another image are kept apart from the source and applied when the
+        image is drawn; :meth:`get_pixel_array` returns the pixels with them
+        applied.
         """
         return self._pixel_array
 
     @pixel_array.setter
     def pixel_array(self, pixels: PixelArray) -> None:
-        pixels = np.array(pixels, copy=None)
-        if pixels.flags.writeable or not pixels.flags.c_contiguous:
-            pixels = np.ascontiguousarray(pixels).copy()
-            pixels.flags.writeable = False
-        self._pixel_array = pixels
+        self._adopt(np.array(pixels, order="C"))
         self.texture_key = new_texture_key()
         self._image_mix: tuple[PixelArray, float] | None = None
         self._image_mix_key: int | None = None
 
+    def _adopt(self, pixels: np.ndarray) -> None:
+        """Hold ``pixels``, a fresh array, as the source; writes to it are tracked."""
+        pixels = pixels.view(_PixelArray)
+        pixels._owner = weakref.ref(self)
+        self._pixel_array = pixels
+
     def __deepcopy__(self, clone_from_id: dict[int, Any]) -> Self:
-        # The pixel arrays are read-only: copies share them, and their textures.
-        clone_from_id.setdefault(id(self._pixel_array), self._pixel_array)
+        # The image being transformed into is only read: copies share it.
         if self._image_mix is not None:
             mix = self._image_mix[0]
             clone_from_id.setdefault(id(mix), mix)
-        return super().__deepcopy__(clone_from_id)
+        result = super().__deepcopy__(clone_from_id)
+        # Its own pixels, as in Manim Community; equal pixels keep the key,
+        # so the copy draws with the same texture until one of them changes.
+        result._adopt(np.array(self._pixel_array.view(np.ndarray)))
+        return result
 
     def get_image_mix(self) -> tuple[PixelArray, int, float] | None:
         """``(pixels, texture key, alpha)`` of the image this one is being
@@ -260,12 +316,12 @@ class ImageMobject(AbstractImageMobject):
         """The pixels as drawn: the source, mixed into the image it is being
         transformed into, with the opacity applied to the alpha channel.
         """
-        pixels = self._pixel_array
+        pixels = self._pixel_array.view(np.ndarray)
         if self._image_mix is None and self.opacity == 1:
             return pixels
         if self._image_mix is not None:
             other, alpha = self._image_mix
-            pixels = interpolate(pixels, other, alpha)
+            pixels = interpolate(pixels, other.view(np.ndarray), alpha)
         else:
             pixels = pixels.astype(np.float64)
         pixels[:, :, 3] *= self.opacity
@@ -277,7 +333,7 @@ class ImageMobject(AbstractImageMobject):
         alpha: Any = None,
         family: bool = True,
     ) -> Self:
-        pixels = self._pixel_array.copy()
+        pixels = self._pixel_array.view(np.ndarray).copy()
         pixels[:, :, :3] = color_to_int_rgb(color)
         if alpha is not None:
             pixels[:, :, 3] = int(255 * alpha)
@@ -356,15 +412,12 @@ class ImageMobject(AbstractImageMobject):
             # has no two textures to blend: settle them on the CPU.
             start = ImageMobject(start._mixed_source())
             end = ImageMobject(end._mixed_source())
-        if self._pixel_array is not start._pixel_array:
-            self._pixel_array = start._pixel_array
-            self.texture_key = start.texture_key
-        if alpha == 0 or end.texture_key == start.texture_key:
-            self._image_mix = None
-            self._image_mix_key = None
-        elif alpha == 1:
-            self._pixel_array = end._pixel_array
-            self.texture_key = end.texture_key
+        source = end if alpha == 1 else start
+        if self.texture_key != source.texture_key:
+            # Equal keys name equal pixels: copy only when this image differs.
+            self._adopt(np.array(source._pixel_array.view(np.ndarray)))
+            self.texture_key = source.texture_key
+        if alpha in (0, 1) or end.texture_key == start.texture_key:
             self._image_mix = None
             self._image_mix_key = None
         else:
@@ -376,8 +429,11 @@ class ImageMobject(AbstractImageMobject):
         """The source mixed into the image it is being transformed into,
         without the opacity.
         """
+        pixels = self._pixel_array.view(np.ndarray)
+        if self._image_mix is None:
+            return pixels.copy()
         other, alpha = self._image_mix
-        return interpolate(self._pixel_array, other, alpha).astype(
+        return interpolate(pixels, other.view(np.ndarray), alpha).astype(
             self.pixel_array_dtype
         )
 

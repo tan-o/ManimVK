@@ -1,4 +1,4 @@
-"""Camera views and projection controls for the Cairo renderer."""
+"""Camera views and projection controls."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 
 class Camera:
-    """Configure the camera view and background for Cairo rendering.
+    """Configure the camera view and background.
 
     A camera has an animatable frame, background settings, and methods for ordering
     and projecting mobjects. The renderer is responsible for drawing this view
@@ -479,7 +479,7 @@ class MultiCamera(Camera):
     ) -> None:
         """Register a display whose image is rendered from another camera."""
         if not isinstance(image_mobject_from_camera.camera, Camera):
-            raise TypeError("Nested Cairo views require a Cairo Camera.")
+            raise TypeError("A nested view needs a Camera.")
         self.image_mobjects_from_cameras.append(image_mobject_from_camera)
 
     def get_mobjects_indicating_movement(self) -> list[Mobject]:

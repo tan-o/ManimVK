@@ -8,11 +8,10 @@ from PIL import Image
 from manim import RIGHT, Scene, Square, ThreeDScene, ZoomedScene, tempconfig
 
 
-@pytest.fixture(params=["cairo", "vulkan"])
+@pytest.fixture
 def image_scene(request):
     with tempconfig(
         {
-            "renderer": request.param,
             "dry_run": True,
             "pixel_width": 128,
             "pixel_height": 128,

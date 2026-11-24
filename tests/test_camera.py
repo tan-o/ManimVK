@@ -30,7 +30,7 @@ from manim import (
     config,
     tempconfig,
 )
-from manim.renderer.cairo import CairoRenderer
+from manim.renderer.skia import SkiaRenderer
 from manim.utils.color import color_to_int_rgba
 
 
@@ -51,7 +51,7 @@ def test_default_camera_preserves_square_geometry(camera_class, pixel_shape):
         assert camera.frame_width == pytest.approx(config.frame_width)
         assert camera.frame_width / camera.frame_height == pytest.approx(width / height)
         frame_points = camera.frame.points.copy()
-        renderer = CairoRenderer(camera=camera)
+        renderer = SkiaRenderer(camera=camera)
         try:
             renderer.render_mobjects(
                 [Square(fill_color="#ffffff", fill_opacity=1, stroke_width=0)],
@@ -103,17 +103,19 @@ def test_mobject_get_image_uses_temporary_renderer():
 
 def test_renderer_owns_background_readback():
     with tempconfig({"pixel_width": 8, "pixel_height": 4}):
-        renderer = CairoRenderer(
+        renderer = SkiaRenderer(
             camera=Camera(background_color=RED, background_opacity=0.5),
         )
         try:
             renderer.update_frame(None, mobjects=[Mobject()])
             pixels = renderer.get_frame()
             expected = color_to_int_rgba(RED, 0.5)
-            assert np.all(pixels == expected)
+            # Straight alpha read back from the GPU may round one level apart.
+            assert np.abs(pixels.astype(int) - expected).max() <= 1
 
+            # Each read is a fresh array the caller owns.
             pixels[:] = 0
-            assert np.all(renderer.get_frame() == expected)
+            assert np.abs(renderer.get_frame().astype(int) - expected).max() <= 1
         finally:
             renderer.close()
 
@@ -131,7 +133,7 @@ def test_background_image_is_loaded_by_renderer(tmp_path):
 
     with tempconfig({"pixel_width": 2, "pixel_height": 2}):
         camera = Camera(background_image=str(image_path))
-        renderer = CairoRenderer(camera=camera)
+        renderer = SkiaRenderer(camera=camera)
         try:
             renderer.update_frame(None, mobjects=[Mobject()])
             np.testing.assert_array_equal(renderer.get_frame(), source)
@@ -147,7 +149,7 @@ def test_background_image_is_resized_to_target(tmp_path):
     Image.fromarray(source, mode="RGBA").save(image_path)
 
     with tempconfig({"pixel_width": 2, "pixel_height": 2}):
-        renderer = CairoRenderer(camera=Camera(background_image=str(image_path)))
+        renderer = SkiaRenderer(camera=Camera(background_image=str(image_path)))
         try:
             renderer.update_frame(None, mobjects=[Mobject()])
             expected = np.asarray(
@@ -164,7 +166,7 @@ def test_background_image_objects_are_read_each_time_they_are_drawn():
     square = Square(side_length=20, fill_opacity=1, stroke_width=0)
     square.color_using_background_image(image)
     with tempconfig({"pixel_width": 2, "pixel_height": 2}):
-        renderer = CairoRenderer()
+        renderer = SkiaRenderer()
         try:
             renderer.render_mobjects([square])
             image.paste((0, 0, 255, 255), (0, 0, 2, 2))  # edited in place
@@ -178,7 +180,7 @@ def test_nested_view_preserves_square_geometry():
     with tempconfig({"pixel_width": 96, "pixel_height": 160}):
         view = ImageMobjectFromCamera(Camera())
         view.set(width=8)
-        renderer = CairoRenderer(camera=MultiCamera([view]))
+        renderer = SkiaRenderer(camera=MultiCamera([view]))
         try:
             renderer.render_mobjects(
                 [Square(fill_color="#ffffff", fill_opacity=1, stroke_width=0), view]
@@ -198,7 +200,7 @@ def test_camera_view_with_a_side_in_line_with_its_longest_side_is_drawn():
     with tempconfig({"pixel_width": 160, "pixel_height": 90}):
         view = ImageMobjectFromCamera(Camera(background_color="#ffffff"))
         view.points = np.array([a, b, d, c], dtype=float)
-        renderer = CairoRenderer(camera=MultiCamera([view]))
+        renderer = SkiaRenderer(camera=MultiCamera([view]))
         try:
             renderer.render_mobjects([view])
             assert renderer.get_frame()[..., 0].any()
@@ -217,7 +219,7 @@ def test_camera_view_with_a_side_in_line_with_its_longest_side_is_drawn():
 )
 def test_closed_renderer_rejects_drawing(operation):
     with tempconfig({"pixel_width": 8, "pixel_height": 4}):
-        renderer = CairoRenderer(skip_animations=True)
+        renderer = SkiaRenderer(skip_animations=True)
         renderer.close()
         with pytest.raises(RuntimeError, match="closed"):
             operation(renderer)
@@ -225,7 +227,7 @@ def test_closed_renderer_rejects_drawing(operation):
 
 def test_nested_views_disable_unsafe_static_reuse():
     view = ImageMobjectFromCamera(Camera())
-    renderer = CairoRenderer(camera=MultiCamera([view]))
+    renderer = SkiaRenderer(camera=MultiCamera([view]))
     scene = SimpleNamespace(moving_mobjects=[Square()])
 
     try:
@@ -256,7 +258,7 @@ def test_nested_camera_cycles_are_rejected():
     first_view = ImageMobjectFromCamera(first)
     first.add_image_mobject_from_camera(second_view)
     second.add_image_mobject_from_camera(first_view)
-    renderer = CairoRenderer(camera=first)
+    renderer = SkiaRenderer(camera=first)
 
     try:
         with pytest.raises(RuntimeError, match="composition cycle"):
@@ -272,7 +274,7 @@ def _angled_line(**kwargs):
 
 
 def _render_pixels(mobjects):
-    renderer = CairoRenderer(camera=Camera())
+    renderer = SkiaRenderer(camera=Camera())
     try:
         renderer.render_mobjects(mobjects)
         return renderer.get_frame().copy()
@@ -309,7 +311,7 @@ def test_3d_camera_angles_follow_their_trackers():
 
 
 def test_nested_views_without_registered_views_allow_static_reuse():
-    renderer = CairoRenderer(camera=MultiCamera())
+    renderer = SkiaRenderer(camera=MultiCamera())
     scene = SimpleNamespace(
         moving_mobjects=[Square()], mobjects=[], foreground_mobjects=[]
     )
@@ -317,7 +319,7 @@ def test_nested_views_without_registered_views_allow_static_reuse():
     try:
         renderer.save_static_frame_data(scene, [Square()])
         assert renderer._render_all_mobjects is False
-        assert renderer.static_image is not None
+        assert renderer._target.restore_static_layer()
     finally:
         renderer.close()
 
@@ -349,7 +351,7 @@ def test_3d_images_line_up_with_vmobjects_when_frame_center_moves():
         square.move_to(2 * RIGHT).set_stroke(width=0)
 
         def white_columns(mobject):
-            renderer = CairoRenderer(camera=camera)
+            renderer = SkiaRenderer(camera=camera)
             try:
                 renderer.render_mobjects([mobject])
                 return np.where(renderer.get_frame()[..., 0].max(axis=0) > 128)[0]
@@ -369,7 +371,7 @@ def test_copied_camera_view_shows_the_same_camera():
         copy = view.copy().shift(6 * RIGHT)
         assert copy.camera is source
 
-        renderer = CairoRenderer(camera=MultiCamera([view]))
+        renderer = SkiaRenderer(camera=MultiCamera([view]))
         try:
             renderer.render_mobjects([view, copy])
             red = renderer.get_frame()[..., 0] > 128
@@ -391,7 +393,7 @@ def test_3d_camera_computes_its_view_once_per_frame(monkeypatch):
     )
     squares = [Square().shift(0.1 * i * RIGHT) for i in range(20)]
     with tempconfig({"pixel_width": 32, "pixel_height": 18}):
-        renderer = CairoRenderer(camera=camera)
+        renderer = SkiaRenderer(camera=camera)
         try:
             renderer.render_mobjects(squares)
         finally:
@@ -401,7 +403,7 @@ def test_3d_camera_computes_its_view_once_per_frame(monkeypatch):
 
 def test_update_frame_leaves_out_excluded_mobjects():
     with tempconfig({"pixel_width": 16, "pixel_height": 8}):
-        renderer = CairoRenderer()
+        renderer = SkiaRenderer()
         square = Square(fill_opacity=1, color=RED).scale(4)
         try:
             renderer.update_frame(None, mobjects=[square], excluded_mobjects=[square])
@@ -415,7 +417,7 @@ def test_update_frame_leaves_out_excluded_mobjects():
 def test_camera_views_share_the_image_files_read_for_the_frame(tmp_path, monkeypatch):
     # A camera view of the same size as the frame needs the same pixels of a
     # background file; it should not read the file again.
-    from manim.renderer.cairo import target
+    from manim.renderer.skia import target
 
     path = tmp_path / "background.png"
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(path)
@@ -430,7 +432,7 @@ def test_camera_views_share_the_image_files_read_for_the_frame(tmp_path, monkeyp
     with tempconfig({"pixel_width": 4, "pixel_height": 4}):
         view = ImageMobjectFromCamera(Camera())
         view.set(width=config.frame_width)
-        renderer = CairoRenderer(camera=MultiCamera([view]))
+        renderer = SkiaRenderer(camera=MultiCamera([view]))
         try:
             renderer.render_mobjects([square, view])
             renderer.render_mobjects([square, view])
@@ -443,7 +445,7 @@ def test_closing_a_renderer_releases_the_image_files_it_read(tmp_path):
     path = tmp_path / "background.png"
     Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(path)
     with tempconfig({"pixel_width": 4, "pixel_height": 4}):
-        renderer = CairoRenderer(camera=Camera(background_image=str(path)))
+        renderer = SkiaRenderer(camera=Camera(background_image=str(path)))
         renderer.render_mobjects([Square()])
         assert renderer._image_files._images
         renderer.close()
@@ -490,7 +492,7 @@ def test_auto_zoom_checks_the_side_it_fits():
 
 
 def test_a_cairo_renderer_closes_at_the_end_of_a_with_block():
-    with CairoRenderer() as renderer:
+    with SkiaRenderer() as renderer:
         renderer.render_mobjects([Square()])
     with pytest.raises(RuntimeError, match="closed"):
         renderer.render_mobjects([Square()])

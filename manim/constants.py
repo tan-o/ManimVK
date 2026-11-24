@@ -271,8 +271,10 @@ class RendererType(Enum):
         <RendererType.VULKAN: 'vulkan'>
     """
 
-    CAIRO = "cairo"  #: The Cairo reference rasterizer.
-    VULKAN = "vulkan"  #: The Skia/Vulkan renderer.
+    #: Accepted as in Manim Community scripts and configs; draws with
+    #: Skia/Vulkan like VULKAN, the only renderer.
+    CAIRO = "cairo"
+    VULKAN = "vulkan"  #: Skia's Ganesh backend on Vulkan.
 
 
 class LineJointType(Enum):

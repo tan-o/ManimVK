@@ -11,7 +11,6 @@ import srt
 from manim import Manager, Scene, tempconfig
 from manim._config.output import OutputFormat
 from manim.animation.animation import Wait
-from manim.constants import RendererType
 from manim.renderer._execution import _ExecutionState
 from manim.renderer.protocol import RendererCapabilities, RendererState
 from manim.utils.exceptions import EndSceneEarlyException, RerunSceneException
@@ -343,7 +342,7 @@ def test_scene_play_routes_through_manager_in_interactive_mode(
     worker_thread = threading.Thread(name="Worker")
     monkeypatch.setattr(threading, "current_thread", lambda: worker_thread)
 
-    with tempconfig({"renderer": RendererType.VULKAN}):
+    with tempconfig({}):
         scene.play(
             Wait(),
             run_time=2,

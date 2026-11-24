@@ -8,7 +8,7 @@ from ... import __version__, config, logger
 from .window_settings import _WindowSettings
 
 if TYPE_CHECKING:
-    from .renderer import VulkanRenderer
+    from .renderer import SkiaRenderer
 
 __all__ = ["VulkanWindow"]
 
@@ -18,7 +18,7 @@ class VulkanWindow:
 
     def __init__(
         self,
-        renderer: VulkanRenderer,
+        renderer: SkiaRenderer,
         window_size: str | tuple[int, ...] | None = None,
         *,
         _settings: _WindowSettings | None = None,

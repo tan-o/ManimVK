@@ -33,9 +33,8 @@ class Motion(Scene):
         self.wait(2, stop_condition=lambda: self.time >= start + 0.5)
 
 
-def settings(backend, tmp_path, output="none"):
+def settings(tmp_path, output="none"):
     return {
-        "renderer": backend,
         "format": output,
         "frame_rate": FRAME_RATE,
         "pixel_width": 64,
@@ -47,8 +46,7 @@ def settings(backend, tmp_path, output="none"):
     }
 
 
-@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
-def test_frames_match_the_rendered_frames(backend, tmp_path, monkeypatch):
+def test_frames_match_the_rendered_frames(tmp_path, monkeypatch):
     rendered = []
     original = SceneFileWriter.write_frame
 
@@ -57,12 +55,14 @@ def test_frames_match_the_rendered_frames(backend, tmp_path, monkeypatch):
         original(writer, pixels, repeat=repeat)
 
     monkeypatch.setattr(SceneFileWriter, "write_frame", write_frame)
-    with tempconfig(settings(backend, tmp_path, output="mp4")):
+    # Compare RGBA frames, not the GPU-converted video frames.
+    monkeypatch.setattr(SceneFileWriter, "accepts_yuv420", property(lambda writer: False))
+    with tempconfig(settings(tmp_path, output="mp4")):
         Manager(Motion()).render()
     assert len(rendered) == 3 + 2 + 2 + 2
 
     frames = []
-    with tempconfig(settings(backend, tmp_path)):
+    with tempconfig(settings(tmp_path)):
         manager = Manager(Motion())
         times = [(index + 0.5) / FRAME_RATE for index in range(len(rendered))]
         manager.evaluate(frame_times=times, on_frame=frames.append)
@@ -78,7 +78,7 @@ def test_frames_are_delivered_in_time_order(tmp_path):
             self.wait(1, frozen_frame=True)
 
     frames = []
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         manager = Manager(Short())
         manager.evaluate(
             frame_times=[1.0, 0.3, 0.25, 0.3, 1.5, 99],
@@ -94,7 +94,7 @@ def test_frames_are_delivered_in_time_order(tmp_path):
 
 def test_frames_and_timeline_come_from_one_evaluation(tmp_path):
     frames = []
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         manager = Manager(Motion())
         manager.evaluate(
             capture_timeline=True, frame_times=[1.0], on_frame=frames.append
@@ -104,7 +104,7 @@ def test_frames_and_timeline_come_from_one_evaluation(tmp_path):
 
 
 def test_invalid_requests_are_rejected(tmp_path):
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         for times in ([-1], [float("nan")]):
             with pytest.raises(ValueError, match="finite"):
                 Manager(Motion()).evaluate(frame_times=times, on_frame=print)
@@ -114,7 +114,7 @@ def test_invalid_requests_are_rejected(tmp_path):
 
 def test_a_rejected_request_can_be_corrected(tmp_path):
     received = []
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         manager = Manager(Motion())
         with pytest.raises(ValueError, match="on_frame"):
             manager.evaluate(frame_times=[0.5])
@@ -129,7 +129,7 @@ def test_frozen_frames_added_by_the_renderer_are_evaluated(tmp_path):
             self.renderer.freeze_current_frame(1)
 
     received = []
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         scene = Freezes()
         Manager(scene).evaluate(frame_times=[0.6], on_frame=received.append)
     assert scene.time == 1
@@ -147,7 +147,7 @@ def test_vulkan_evaluation_draws_all_frames_with_one_renderer(tmp_path, monkeypa
         created.append(renderer)
         init(renderer, *args, **kwargs)
 
-    with tempconfig(settings("vulkan", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         scene = Motion()
         monkeypatch.setattr(SkiaRenderer, "__init__", count)
         received = []
@@ -161,7 +161,7 @@ def test_an_error_in_on_frame_ends_the_evaluation(tmp_path):
     def fail(frame):
         raise KeyError("stop")
 
-    with tempconfig(settings("cairo", tmp_path)):
+    with tempconfig(settings(tmp_path)):
         manager = Manager(Motion())
         with pytest.raises(KeyError, match="stop"):
             manager.evaluate(frame_times=[0.5], on_frame=fail)

@@ -253,7 +253,7 @@ render_options = option_group(
             [renderer_type.value for renderer_type in RendererType],
             case_sensitive=False,
         ),
-        help="Select a renderer for your Scene.",
+        help="Accepted for Manim Community compatibility; every value draws with Skia/Vulkan.",
         default=None,
     ),
     option(

@@ -1,6 +1,6 @@
-"""Render the collected example scenes with one renderer.
+"""Render every collected example scene and check that none fails.
 
-For every scene this stores, under ``<out>/<renderer>/<id>/``:
+For every scene this stores, under ``<out>/frames/<id>/``:
 
 * ``eval_first.png``, ``eval_mid.png``, ``eval_last.png``: frames drawn by
   :meth:`.Manager.evaluate` at the first, middle and last sampled times
@@ -10,10 +10,11 @@ For every scene this stores, under ``<out>/<renderer>/<id>/``:
 * ``status.json``: success flag, error text and timing.
 
 Each scene runs in its own subprocess with a timeout, so a crash or hang in one
-example cannot stop the run::
+example cannot stop the run.  The run fails when a scene raises that is not in
+``known_errors.json`` (scene id -> why it cannot render here), and writes
+``<out>/report.md`` with the errors::
 
-    python tools/golden/render.py --scenes golden --renderer cairo --jobs 4
-    python tools/golden/render.py --scenes golden --renderer vulkan --jobs 1
+    python tools/scenes/render.py --scenes scenes --jobs 2
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ SAMPLE_STEP = 0.5
 MAX_SAMPLED_TIME = 240.0
 
 
-def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, height: int) -> None:
+def run_worker(entry: dict, scenes: Path, out: Path, width: int, height: int) -> None:
     """Render one scene in this process (called through ``--worker``)."""
     import importlib.util
     import random
@@ -46,14 +47,14 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
 
     def seed() -> None:
         # Examples use both Python's and NumPy's global RNGs for layouts and
-        # StreamLines phases.  Cairo and Vulkan run in separate processes, so
-        # without an explicit seed they compare two different random scenes.
+        # StreamLines phases.  Seeded, every run draws the same scene, so
+        # frames from two runs can be compared.
         random.seed(0)
         np.random.seed(0)
 
     # networkx layout functions use ``np.random.default_rng(seed)``; a fresh
     # generator with seed=None ignores ``np.random.seed``.  Force a deterministic
-    # seed for the comparison only.
+    # seed for these runs only.
     import networkx.drawing.layout as nx_layout
 
     for _name in ("spring_layout", "random_layout"):
@@ -65,12 +66,12 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
 
         setattr(nx_layout, _name, _seeded_layout)
 
-    target = out / renderer / entry["id"]
+    target = out / "frames" / entry["id"]
     target.mkdir(parents=True, exist_ok=True)
     status: dict = {"id": entry["id"], "ok": False, "error": None, "frames": []}
     started = time.perf_counter()
     try:
-        spec = importlib.util.spec_from_file_location(f"golden_{entry['id']}", scenes / "scenes" / entry["module"])
+        spec = importlib.util.spec_from_file_location(f"scene_{entry['id']}", scenes / "scenes" / entry["module"])
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         seed()
@@ -86,7 +87,6 @@ def run_worker(entry: dict, scenes: Path, renderer: str, out: Path, width: int, 
 
         scene_class.construct = seeded_construct
         settings = {
-            "renderer": renderer,
             "pixel_width": width,
             "pixel_height": height,
             "frame_rate": 15,
@@ -130,10 +130,12 @@ def cwd_for(entry: dict) -> Path:
     return ROOT / "docs" / "source"
 
 
+KNOWN_ERRORS = json.loads(Path(__file__).with_name("known_errors.json").read_text(encoding="utf-8"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--scenes", type=Path, default=Path("golden"), help="output of collect.py")
-    parser.add_argument("--renderer", choices=["cairo", "vulkan"], required=True)
+    parser.add_argument("--scenes", type=Path, default=Path("scenes"), help="output of collect.py")
     parser.add_argument("--out", type=Path, default=None, help="defaults to --scenes")
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds per scene")
@@ -146,7 +148,7 @@ def main() -> None:
     width, height = (int(v) for v in args.size.split("x"))
 
     if args.worker is not None:
-        run_worker(json.loads(args.worker), scenes, args.renderer, out, width, height)
+        run_worker(json.loads(args.worker), scenes, out, width, height)
         return
 
     entries = json.loads((scenes / "scenes.json").read_text(encoding="utf-8"))
@@ -156,9 +158,9 @@ def main() -> None:
     def run(entry: dict) -> tuple[str, bool, str]:
         command = [
             sys.executable, str(Path(__file__).resolve()), "--scenes", str(scenes), "--out", str(out),
-            "--renderer", args.renderer, "--size", args.size, "--worker", json.dumps(entry),
+            "--size", args.size, "--worker", json.dumps(entry),
         ]
-        target = out / args.renderer / entry["id"]
+        target = out / "frames" / entry["id"]
         try:
             result = subprocess.run(
                 command, cwd=cwd_for(entry), capture_output=True, text=True,
@@ -179,13 +181,32 @@ def main() -> None:
         return entry["id"], status["ok"], status.get("error") or ""
 
     started = time.perf_counter()
-    failed = 0
+    errors: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for index, (scene_id, ok, error) in enumerate(pool.map(run, entries), 1):
-            failed += not ok
+            if not ok:
+                errors.append((scene_id, error))
             mark = "ok " if ok else "ERR"
             print(f"[{index}/{len(entries)}] {mark} {scene_id} {error[:120]}", flush=True)
-    print(f"{len(entries) - failed} ok, {failed} errors, {time.perf_counter() - started:.0f}s")
+    unexpected = [(scene_id, error) for scene_id, error in errors if scene_id not in KNOWN_ERRORS]
+    elapsed = time.perf_counter() - started
+    lines = [
+        "# Example scenes",
+        "",
+        f"{len(entries) - len(errors)} rendered, {len(errors) - len(unexpected)} known errors, "
+        f"{len(unexpected)} unexpected errors, {elapsed:.0f}s",
+        "",
+        "| Scene | Error | Known because |",
+        "|---|---|---|",
+    ]
+    for scene_id, error in sorted(errors, key=lambda item: item[0] in KNOWN_ERRORS):
+        error = error.replace("|", "\\|").replace("\n", " ")[:200]
+        lines.append(f"| {scene_id} | {error} | {KNOWN_ERRORS.get(scene_id, '**unexpected**')} |")
+    report = "\n".join(lines) + "\n"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "report.md").write_text(report, encoding="utf-8")
+    print(report)
+    sys.exit(1 if unexpected else 0)
 
 
 if __name__ == "__main__":

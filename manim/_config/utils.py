@@ -1327,9 +1327,11 @@ class ManimConfig(MutableMapping):
 
     @property
     def renderer(self) -> RendererType:
-        """The currently active renderer.
+        """The renderer named in the config or with ``--renderer``.
 
-        Populated with one of the available renderers in :class:`.RendererType`.
+        Populated with one of the values of :class:`.RendererType`.  Every
+        value draws with Skia/Vulkan; ``"cairo"`` is accepted as in Manim
+        Community scripts and configs.
 
         Tests::
 

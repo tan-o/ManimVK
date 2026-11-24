@@ -6,14 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import cairo
-import pytest
 from _pytest.fixtures import FixtureRequest
 
 from manim import Scene
 from manim._config import tempconfig
 from manim._config.utils import ManimConfig
-from manim.renderer.cairo import CairoRenderer
+from manim.renderer.skia import SkiaRenderer
 from manim.camera import ThreeDCamera
 from manim.scene.three_d_scene import ThreeDScene
 from manim.typing import StrPath
@@ -29,14 +27,13 @@ from ._test_class_makers import (
 SCENE_PARAMETER_NAME = "scene"
 _tests_root_dir_path = Path(__file__).absolute().parents[2]
 PATH_CONTROL_DATA = _tests_root_dir_path / Path("control_data", "graphical_units_data")
-MIN_CAIRO_VERSION = 11800
 
 
 def frames_comparison(
     func: Callable | None = None,
     *,
     last_frame: bool = True,
-    renderer_class: type[CairoRenderer] = CairoRenderer,
+    renderer_class: type[SkiaRenderer] = SkiaRenderer,
     base_scene: type[Scene] = Scene,
     **custom_config: Any,
 ) -> Callable:
@@ -53,7 +50,7 @@ def frames_comparison(
     last_frame
         whether the test should test the last frame, by default True.
     renderer_class
-        The base renderer to use, by default CairoRenderer
+        The base renderer to use, by default SkiaRenderer
     base_scene
         The base class for the scene (ThreeDScene, etc.), by default Scene
 
@@ -89,12 +86,6 @@ def frames_comparison(
         def wrapper(
             *args: Any, request: FixtureRequest, tmp_path: StrPath, **kwargs: Any
         ) -> None:
-            # check for cairo version
-            if (
-                renderer_class is CairoRenderer
-                and cairo.cairo_version() < MIN_CAIRO_VERSION
-            ):
-                pytest.skip("Cairo version is too old. Skipping cairo graphical tests.")
             # Wraps the test_function to a construct method, to "freeze" the eventual additional arguments (parametrizations fixtures).
             construct = functools.partial(tested_scene_construct, *args, **kwargs)
 
@@ -216,9 +207,8 @@ def _make_test_comparing_frames(
             sceneTested = _make_test_scene_class(
                 base_scene=base_scene,
                 construct_test=construct,
-                # NOTE this is really ugly but it's due to the very bad design of the two renderers.
-                # If you pass a custom renderer to the Scene, the Camera class given as an argument in the Scene
-                # is not passed to the renderer. See __init__ of Scene.
+                # A renderer passed to the Scene does not get the Scene's camera
+                # class (see Scene.__init__), so a 3D test passes it here.
                 test_renderer=(
                     testRenderer(file_writer_class=file_writer_class)
                     if base_scene is not ThreeDScene

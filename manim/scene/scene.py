@@ -53,10 +53,6 @@ from ..manager import Manager
 from ..renderer.skia.renderer import SkiaRenderer
 from ..camera import Camera
 from ..scene.scene_file_writer import _SceneFileWriterSettings
-
-if TYPE_CHECKING:
-    from ..renderer.cairo.renderer import CairoRenderer
-    from ..renderer.vulkan.renderer import VulkanRenderer
 from ..utils.deprecation import deprecated
 from ..utils.exceptions import RerunSceneException
 from ..utils.family import extract_mobject_family_members
@@ -210,22 +206,10 @@ class Scene:
         self.mouse_drag_point = Point()
 
         if renderer is None:
-            if config.renderer == RendererType.CAIRO:
-                # Explicit Cairo requests keep the baseline rasterizer for
-                # compatibility tests and reference renders.
-                from ..renderer.cairo import CairoRenderer
-
-                renderer = CairoRenderer(
-                    camera_class=self.camera_class,
-                    skip_animations=self.skip_animations,
-                )
-            else:
-                # Classic mobjects keep their full API; only the raster backend
-                # is switched from Cairo to Skia/Ganesh on Vulkan.
-                renderer = SkiaRenderer(
-                    camera_class=self.camera_class,
-                    skip_animations=self.skip_animations,
-                )
+            renderer = SkiaRenderer(
+                camera_class=self.camera_class,
+                skip_animations=self.skip_animations,
+            )
         self._renderer: Any = renderer
         self.session_spec = resolve_render_session(
             config,
@@ -290,7 +274,7 @@ class Scene:
         np.random.seed(self.random_seed)  # noqa: NPY002 (only way to set seed globally)
 
     @property
-    def renderer(self) -> CairoRenderer | VulkanRenderer:
+    def renderer(self) -> SkiaRenderer:
         """The renderer selected at construction, shared by this scene's plays.
 
         This property is read-only. Choose a different renderer when creating
@@ -678,7 +662,7 @@ class Scene:
 
         .. WARNING::
 
-            When using the Cairo renderer, scene updaters that
+            Scene updaters that
             modify mobjects are not detected in the same way
             that mobject updaters are. To be more concrete,
             a mobject only modified via a scene updater will

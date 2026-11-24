@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter
 
-import numpy as np
 import pytest
 
 from manim import Circle, Create, FadeOut, Scene, Square, Transform, tempconfig
-from manim.preview import PreviewSession, Storyboard, capture_storyboard
+from manim.preview import PreviewSession, capture_storyboard
 from manim.renderer.skia import renderer as skia_renderer
 
 
@@ -40,7 +38,7 @@ class _Device:
 @pytest.fixture(autouse=True)
 def native(monkeypatch):
     monkeypatch.setattr(skia_renderer.manim_vk, "Device", _Device)
-    with tempconfig({"renderer": "vulkan", "frame_rate": 10, "pixel_width": 64, "pixel_height": 36}):
+    with tempconfig({"frame_rate": 10, "pixel_width": 64, "pixel_height": 36}):
         yield
 
 

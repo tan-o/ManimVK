@@ -34,7 +34,6 @@ class TimelineFixture(Scene):
 """
 
 SETTINGS = {
-    "renderer": "cairo",
     "frame_rate": 4,
     "pixel_width": 32,
     "pixel_height": 16,

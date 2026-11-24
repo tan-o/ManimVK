@@ -14,11 +14,10 @@ from manim import (
 RASTER_CALLS = ("render", "get_frame", "_prepare_animation", "_present_frozen_frame")
 
 
-@pytest.fixture(params=["cairo", "vulkan"])
+@pytest.fixture
 def settings(request, tmp_path):
     with tempconfig(
         {
-            "renderer": request.param,
             "format": "mp4",
             "frame_rate": 4,
             "pixel_width": 32,

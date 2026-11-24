@@ -7,10 +7,9 @@ import pytest
 
 from manim import LEFT, RIGHT, Dot, Manager, Scene, Square, tempconfig
 from manim._run import listeners
-from manim.renderer.cairo.renderer import CairoRenderer
+from manim.renderer.skia import SkiaRenderer
 
 SETTINGS = {
-    "renderer": "cairo",
     "format": "none",
     "frame_rate": 4,
     "pixel_width": 32,
@@ -98,7 +97,7 @@ def test_each_frame_is_drawn_once_for_all_listeners(tmp_path):
         scene = Stateful()
         scene.skip_intro = False
         with patch.object(
-            CairoRenderer, "render", autospec=True, side_effect=CairoRenderer.render
+            SkiaRenderer, "render", autospec=True, side_effect=SkiaRenderer.render
         ) as render:
             Manager(scene).render()
     # 1 s + 0.5 s + 1 s at 4 fps; the encoder and the preview share each drawing.

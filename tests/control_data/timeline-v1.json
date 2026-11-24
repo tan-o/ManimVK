@@ -3,7 +3,7 @@
   "version": 1,
   "mode": "evaluate",
   "scene": "TimelineFormat",
-  "backend": "CairoRenderer",
+  "backend": "SkiaRenderer",
   "frame_rate": 4.0,
   "duration": 2.5,
   "ended_early": false,

@@ -23,7 +23,6 @@ def test_missing_vulkan_device_has_actionable_error(monkeypatch):
     )
     with tempconfig(
         {
-            "renderer": "vulkan",
             "pixel_width": 32,
             "pixel_height": 18,
             "format": "none",
@@ -41,7 +40,6 @@ def test_missing_vulkan_device_has_actionable_error(monkeypatch):
 def test_skia_target_rejects_cross_thread_access():
     with tempconfig(
         {
-            "renderer": "vulkan",
             "pixel_width": 32,
             "pixel_height": 18,
             "format": "none",

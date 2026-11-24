@@ -191,7 +191,7 @@ class _TargetDrawer(_Drawer):
         renderer = self._manager.renderer
         scene = self._manager.scene
         if not self._prepared:
-            # Drawing resources and Cairo's background of still mobjects, once
+            # Drawing resources and the background of still mobjects, once
             # per play and only for plays that draw.
             renderer._start_animation()
             renderer._prepare_animation(scene)
@@ -379,7 +379,7 @@ class _RunLoop:
             listener.frame(frame)
 
     def add_frames(self, pixels: RGBAPixelArray | None, repeat: int) -> None:
-        """Show ``repeat`` frames outside of a play, as CairoRenderer.add_frame() does.
+        """Show ``repeat`` frames outside of a play, as SkiaRenderer.add_frame() does.
 
         ``pixels`` is the image to show, or None for the scene's current state,
         drawn only if a listener asks for it.

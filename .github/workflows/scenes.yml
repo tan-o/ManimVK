@@ -1,9 +1,9 @@
-name: Golden (Cairo vs Vulkan)
+name: Tests and example scenes
 
-# Renders every example scene with both renderers and compares the frames
-# (tools/golden).  GitHub's runners have no GPU: Mesa's lavapipe provides
-# Vulkan in software, so the real Skia Ganesh Vulkan path runs, only slower.
-# The report is uploaded as an artifact and summarised on the run page.
+# Builds the native modules, runs the test suite, renders a movie through the
+# video path and renders every example scene (tools/scenes).  GitHub's runners
+# have no GPU: Mesa's lavapipe provides Vulkan in software, so the real Skia
+# Ganesh Vulkan path runs, only slower.
 
 on:
   workflow_dispatch:
@@ -18,11 +18,11 @@ on:
       - rust-core-preview
 
 concurrency:
-  group: golden-${{ github.ref }}
+  group: scenes-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  golden:
+  scenes:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
@@ -87,21 +87,20 @@ jobs:
 
       - name: Install manim and the native modules
         run: |
-          # legacy: pycairo, for the Cairo reference renderer and the tests;
           # typst: TypstMobject examples; dev: test and example dependencies.
-          uv pip install --system -e ".[legacy,typst]" --group dev
+          uv pip install --system -e ".[typst]" --group dev
           uv pip install --system ./native/manim_core ./native/manim_vk
           python -c "import manim_vk, manim_core; print('native modules import')"
 
-      - name: Run the module tests
-        continue-on-error: true
-        run: python -m pytest tests/module -q -o addopts="" -p no:cacheprovider
+      - name: Run the tests
+        run: python -m pytest tests -q -o addopts="" -p no:cacheprovider
 
-      - name: Render a movie with Vulkan
+      - name: Render a movie
+        if: ${{ !cancelled() }}
         # Golden compares PNG frames; this covers the video path (GPU YUV
         # readback and the encoder).
         run: |
-          manim render -ql --renderer vulkan --media_dir media example_scenes/basic.py SquareToCircle
+          manim render -ql --media_dir media example_scenes/basic.py SquareToCircle
           python - <<'EOF'
           import glob, av
           path = glob.glob("media/videos/**/SquareToCircle.mp4", recursive=True)[0]
@@ -114,35 +113,22 @@ jobs:
           assert frames > 0
           EOF
 
-      - name: Collect scenes
-        run: python tools/golden/collect.py --out golden
-
-      - name: Render with Cairo
+      - name: Render the example scenes
+        if: ${{ !cancelled() }}
         run: |
-          python tools/golden/render.py --scenes golden --out golden --renderer cairo --jobs 4 \
-            ${ONLY:+--only "$ONLY"}
-
-      - name: Render with Vulkan
-        run: |
-          python tools/golden/render.py --scenes golden --out golden --renderer vulkan --jobs 2 \
-            ${ONLY:+--only "$ONLY"}
-
-      - name: Compare
-        run: |
-          python tools/golden/compare.py --reference golden/cairo --candidate golden/vulkan --out golden/report
-          # In the log too, which can be read without downloading the artifact.
-          grep -v "| PASS |" golden/report/report.md
-          {
-            echo "## Golden: Cairo vs Vulkan (lavapipe)"
-            grep -v "| PASS |" golden/report/report.md
-          } >> "$GITHUB_STEP_SUMMARY"
+          python tools/scenes/collect.py --out scenes
+          status=0
+          python tools/scenes/render.py --scenes scenes --jobs 2 ${ONLY:+--only "$ONLY"} || status=$?
+          cat scenes/report.md >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: golden-report
+          name: scenes-report
           path: |
-            golden/report
+            scenes/report.md
+            scenes/frames/*/final.png
             media/videos
           if-no-files-found: warn

@@ -1,4 +1,4 @@
-"""Public Mobject image APIs must stay on the Vulkan/Skia path by default."""
+"""Public Mobject image APIs render through the Skia/Vulkan renderer."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ pytest.importorskip("manim_vk")
 
 from PIL import Image  # noqa: E402
 from manim import Circle, tempconfig  # noqa: E402
+from manim.renderer.skia import SkiaRenderer  # noqa: E402
 
 
-def test_mobject_get_image_does_not_construct_cairo_renderer():
+def test_mobject_get_image_renders_with_vulkan():
     with tempconfig(
         {
-            "renderer": "vulkan",
             "pixel_width": 64,
             "pixel_height": 36,
             "format": "png",
@@ -23,12 +23,11 @@ def test_mobject_get_image_does_not_construct_cairo_renderer():
             "verbosity": "ERROR",
         }
     ):
-        with mock.patch(
-            "manim.renderer.cairo.CairoRenderer",
-            side_effect=AssertionError("CairoRenderer must not be used by default"),
-        ) as cairo:
+        with mock.patch.object(
+            SkiaRenderer, "render_mobjects", autospec=True, side_effect=SkiaRenderer.render_mobjects
+        ) as render:
             image = Circle().get_image()
-            cairo.assert_not_called()
+        render.assert_called_once()
 
     assert isinstance(image, Image.Image)
     assert image.size == (64, 36)

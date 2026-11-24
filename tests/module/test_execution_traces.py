@@ -1,18 +1,16 @@
-"""Cairo and Vulkan expose the same animation times to user code."""
+"""The animation times user code sees."""
 
 import pytest
 
 from manim import Animation, Scene, Square, tempconfig
 
 
-@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 @pytest.mark.parametrize("duration", [1, 0.3])
 @pytest.mark.parametrize("skip", [False, True])
-def test_animation_clock_trace(backend, duration, skip):
+def test_animation_clock_trace(duration, skip):
     trace = []
     with tempconfig(
         {
-            "renderer": backend,
             "format": "none",
             "live_preview": False,
             "pixel_width": 32,
@@ -61,12 +59,10 @@ def test_animation_clock_trace(backend, duration, skip):
     assert plays == 1
 
 
-@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
 @pytest.mark.parametrize("skip", [False, True])
-def test_frozen_wait_clock_trace(backend, skip):
+def test_frozen_wait_clock_trace(skip):
     with tempconfig(
         {
-            "renderer": backend,
             "format": "none",
             "live_preview": False,
             "pixel_width": 32,
@@ -85,13 +81,11 @@ def test_frozen_wait_clock_trace(backend, skip):
             assert scene.renderer.num_plays == 1
 
 
-@pytest.mark.parametrize("backend", ["cairo", "vulkan"])
-def test_stop_condition_observes_consumed_time(backend):
+def test_stop_condition_observes_consumed_time():
     stops = []
     updates = []
     with tempconfig(
         {
-            "renderer": backend,
             "format": "none",
             "live_preview": False,
             "pixel_width": 32,

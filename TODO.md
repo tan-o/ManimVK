@@ -25,7 +25,7 @@
   - `LinearTransformationSceneExample`
   - `RateFuncExample`
 - [ ] **完整 `tests/` 套件复跑**。目前确定的是 `tests/module`：1059 passed、1 skipped；其余套件尚未全量签收。
-- [ ] **决定是否删除 Cairo 参考渲染器**。删除门槛 `FAIL=0`、`ERROR_CANDIDATE=0` 已满足；REVIEW 签字和单独提交还未完成。
+- [x] **删除 Cairo 参考渲染器**。CI 上 FAIL=0、ERROR_CANDIDATE=0、REVIEW 均为抗锯齿差异后删除；`config.renderer`/`--renderer` 保留以兼容 Manim Community 脚本。
 
 ## P1：功能与素材
 
@@ -44,17 +44,16 @@
 
 ## P3：工程化
 
-- [ ] **golden 进 CI**。把 30 个高风险场景做成 smoke，保留 PASS/REVIEW 基线，禁止 REVIEW 数量增长。
-- [ ] **Cairo/Skia 共享 conformance 层**。背景图逐像素遮罩、AA、采样仍是两套实现；`BasicUsage_2` 等 REVIEW 的根因在这里。
+- [x] **示例场景进 CI**。`.github/workflows/scenes.yml` 渲染全部示例场景，出现 `tools/scenes/known_errors.json` 之外的错误即失败；Cairo 已删除，不再做参考对比。
 - [ ] **CI 里对 `native/manim_vk` 做 `DOCS_RS=1 cargo clippy`**。不需要 Skia 二进制就能类型检查（见 `native/manim_vk/README.md`），可以挡住编译不过的提交。
 - [ ] **原生扩展版本检查**。`lib.rs` 变更后所有机器都必须重编译 `.pyd`；需要版本号校验或预编译 wheel，避免加载旧二进制。
-- [ ] **整理未跟踪产物**。`golden*`、`renders` 等测试输出不应进入仓库；需要明确 `.gitignore` 和归档策略。
+- [ ] **整理未跟踪产物**。`scenes*`、`renders` 等测试输出不应进入仓库；需要明确 `.gitignore` 和归档策略。
 
 ---
 
 ## 建议顺序
 
 1. 先跑全量 458，修 4 个示例错误。
-2. 给 10 个 REVIEW 落基线，决定 Cairo 去留。
+2. （已完成）删除 Cairo。
 3. 把毛球脚本和贴图纳入仓库，补 1080p90 正式片。
-4. 再做 updater 批量和异步回读；没有稳定 golden 基线前不要大改渲染路径。
+4. 再做 updater 批量和异步回读；改渲染路径后看 CI 的测试和示例场景。

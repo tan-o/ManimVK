@@ -5,14 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from manim import Scene, Square, tempconfig
-from manim.renderer.cairo import CairoRenderer
 from manim.renderer.protocol import Renderer, RendererState
 from manim.renderer.skia import SkiaRenderer
 
 
-@pytest.mark.parametrize("renderer_class", [CairoRenderer, SkiaRenderer])
-def test_renderers_implement_the_protocol(renderer_class):
-    renderer = renderer_class()
+def test_the_renderer_implements_the_protocol():
+    renderer = SkiaRenderer()
     try:
         assert isinstance(renderer, Renderer)
         assert renderer.state is RendererState.UNOPENED
@@ -26,9 +24,8 @@ def test_renderers_implement_the_protocol(renderer_class):
 SETTINGS = {"pixel_width": 16, "pixel_height": 8, "format": "none"}
 
 
-@pytest.mark.parametrize("renderer", ["cairo", "vulkan"])
-def test_a_renderer_goes_from_unopened_to_open_to_closed(renderer):
-    with tempconfig({**SETTINGS, "renderer": renderer}):
+def test_a_renderer_goes_from_unopened_to_open_to_closed():
+    with tempconfig(SETTINGS):
         renderer = Scene().renderer
         assert renderer.state is RendererState.UNOPENED
         renderer.open()
@@ -40,8 +37,8 @@ def test_a_renderer_goes_from_unopened_to_open_to_closed(renderer):
             renderer.open()
 
 
-def test_a_failed_vulkan_close_can_be_retried():
-    with tempconfig({**SETTINGS, "renderer": "vulkan"}):
+def test_a_failed_close_can_be_retried():
+    with tempconfig(SETTINGS):
         renderer = Scene().renderer
         renderer.open()
         renderer.render_mobjects([Square()])
@@ -62,9 +59,9 @@ def test_a_failed_vulkan_close_can_be_retried():
         assert target._closed
 
 
-def test_a_failed_cairo_close_can_be_retried():
+def test_an_interrupted_close_can_be_retried():
     with tempconfig(SETTINGS):
-        renderer = CairoRenderer()
+        renderer = SkiaRenderer()
         renderer.render_mobjects([Square()])
         # The first close of the frame target is interrupted.
         target = renderer._target
@@ -82,14 +79,20 @@ def test_a_failed_cairo_close_can_be_retried():
         assert target._closed
 
 
-def test_a_cairo_close_raises_the_first_failure_and_logs_the_others(manim_caplog):
+def test_a_close_raises_the_first_failure_and_logs_the_others(manim_caplog):
     with tempconfig(SETTINGS):
-        renderer = CairoRenderer()
+        renderer = SkiaRenderer()
         renderer.render_mobjects([Square()])
         renderer._target.close = Mock(side_effect=OSError("frame target"))
         renderer._sub_targets["view"] = Mock(close=Mock(side_effect=OSError("view")))
         with pytest.raises(OSError, match="frame target"):
             renderer.close()
     assert renderer.state is RendererState.CLOSE_FAILED
-    assert "Additional Cairo cleanup failure" in manim_caplog.text
+    assert "Additional renderer cleanup failure" in manim_caplog.text
     assert "view" in renderer._sub_targets
+
+
+def test_renderer_cairo_in_a_config_draws_with_vulkan():
+    # Manim Community scripts and configs name the Cairo renderer.
+    with tempconfig({**SETTINGS, "renderer": "cairo"}):
+        assert isinstance(Scene().renderer, SkiaRenderer)

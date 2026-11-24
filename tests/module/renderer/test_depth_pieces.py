@@ -169,7 +169,6 @@ class _HairyBall(ThreeDScene):
 def test_hairs_and_mesh_draw_in_few_runs(calls, tmp_path):
     with tempconfig(
         {
-            "renderer": "vulkan",
             "pixel_width": 160,
             "pixel_height": 90,
             "media_dir": str(tmp_path),

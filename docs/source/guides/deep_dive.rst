@@ -6,9 +6,11 @@ A deep dive into Manim's internals
 .. admonition:: Disclaimer
 
     This guide was originally written for version ``v0.16.0`` and primarily
-    treats the Cairo renderer. Its high-level lifecycle discussion has been
-    updated for the :class:`.Manager` coordination layer, but some lower-level
-    implementation details may still differ from the latest version of Manim.
+    treats the Cairo renderer, which this fork has replaced with
+    :class:`.SkiaRenderer` (Skia on Vulkan).  Its high-level lifecycle
+    discussion has been updated for the :class:`.Manager` coordination layer
+    and holds for the new renderer; where it describes Cairo's drawing, the
+    Skia renderer draws the same mobjects on the GPU.
 
 Introduction
 ------------
@@ -259,12 +261,11 @@ the ``Scene.__init__`` method is called, given that we did not implement our own
 method. Inspecting the corresponding code (see
 `here <https://github.com/ManimCommunity/manim/blob/main/manim/scene/scene.py>`__)
 reveals that ``Scene.__init__`` first sets several attributes of the scene objects that do not
-depend on any configuration options set in ``config``. Then the scene inspects the value of
-``config.renderer``, and based on its value instantiates a ``CairoRenderer`` or
-the default ``SkiaRenderer`` (the Vulkan/Skia backend).  The chosen renderer is exposed by the scene's read-only
-``renderer`` property.
+depend on any configuration options set in ``config``. Then the scene creates its
+renderer, a ``SkiaRenderer`` (Skia on Vulkan, the only renderer), unless one was
+passed in.  The renderer is exposed by the scene's read-only ``renderer`` property.
 
-After selecting the renderer, the scene resolves the mutable configuration into
+After creating the renderer, the scene resolves the mutable configuration into
 an immutable *render-session specification*. In abbreviated form, initialization
 continues as follows:
 
@@ -393,7 +394,7 @@ After these hooks have run, :meth:`.Manager.post_construct` checks whether the
 resolved output can be finalized. An explicit video format for a scene without
 play calls raises an error instead of silently changing the requested artifact.
 Otherwise, the manager asks the renderer to finish the scene. For Cairo this
-calls :meth:`.CairoRenderer.scene_finished`, which tells the
+calls :meth:`.SkiaRenderer.scene_finished`, which tells the
 :class:`.SceneFileWriter` to finish any time-based output. For video output, the
 file writer waits for partial movie files that are still being encoded and
 combines them into the final movie. For last-frame PNG output, the animations
@@ -974,7 +975,7 @@ when iterating through the time progression of the animation only the
 "moving mobjects" are re-painted on top of the static background.
 
 When the first frame of a play is drawn,
-:meth:`.CairoRenderer.save_static_frame_data` is called, which
+:meth:`.SkiaRenderer.save_static_frame_data` is called, which
 first checks whether there are currently any static mobjects, and if there
 are, it updates the frame (only with the static mobjects; more about how
 exactly this works in a moment) and then saves a NumPy array representing
@@ -1032,10 +1033,10 @@ to match the currently processed timestamp. If the play is part of the output,
 it is now time to *take a picture*!
 
 To render an image, the encoder calls the corresponding method of the renderer,
-:meth:`.CairoRenderer.render` and passes just the list of *moving mobjects* (remember,
+:meth:`.SkiaRenderer.render` and passes just the list of *moving mobjects* (remember,
 the *static mobjects* are assumed to have already been painted statically to
 the background of the scene). All of the hard work then happens when the renderer
-updates its current frame via a call to :meth:`.CairoRenderer.update_frame`:
+updates its current frame via a call to :meth:`.SkiaRenderer.update_frame`:
 
 First, the renderer prepares its Cairo image buffer. If a reusable ``static_image``
 is available, the renderer copies it into that buffer; otherwise it resets the buffer
@@ -1058,7 +1059,7 @@ the implementation -- but the drawing process can be summarized as follows:
 - The renderer then draws each of these images in the corresponding
   :class:`.ImageMobjectFromCamera` in the primary view.
 
-After drawing, :meth:`.CairoRenderer.get_frame` copies the rendered image into a
+After drawing, :meth:`.SkiaRenderer.get_frame` copies the rendered image into a
 top-left-origin, row-major (C-contiguous) ``uint8`` RGBA array, which the encoder passes to
 the :class:`.SceneFileWriter`. Then the manager advances the clock by one frame.
 If the animation has a stop condition, the manager checks it at this point,

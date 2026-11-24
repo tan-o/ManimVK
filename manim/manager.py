@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from ._config.render_session import RenderSessionSpec
     from .animation.animation import Animation
     from .mobject.mobject import Mobject, _AnimationBuilder
-    from .renderer.cairo import CairoRenderer
+    from .renderer.skia import SkiaRenderer
     from .camera import Camera
     from .scene.scene import Scene
     from .scene.scene_file_writer import SceneFileWriter
@@ -296,7 +296,7 @@ class Manager(Generic[SceneT]):
         self._close("Failed to clean up resources after a render failure")
 
     @property
-    def renderer(self) -> CairoRenderer:
+    def renderer(self) -> SkiaRenderer:
         """The renderer selected when the scene was created."""
         return self.scene.renderer
 
@@ -859,24 +859,12 @@ class Manager(Generic[SceneT]):
     def _wants_frame_pixels(self) -> bool:
         """Whether the file writer is given the pixels of drawn frames.
 
-        Reading pixels back is cheap for Cairo, and test writers record them
-        even without file output. Skia/Vulkan reads them back only for video,
-        image-sequence, or still output.
+        Frames stay on the GPU; they are read back only for video,
+        image-sequence, or still output.  Live preview gets its own frame in
+        VulkanWindow.swap_buffers().
         """
-        from .renderer.cairo.renderer import CairoRenderer
-        from .renderer.skia.renderer import SkiaRenderer
-
         output = self.output_spec
-        if isinstance(self.renderer, SkiaRenderer):
-            # Skia keeps frames on the GPU; only ask for a readback when the
-            # output actually needs CPU pixels.  Live preview gets its own
-            # frame in VulkanWindow.swap_buffers().
-            return output.is_video or output.is_image_sequence or output.is_still
-        return (
-            isinstance(self.renderer, CairoRenderer)
-            or output.is_video
-            or output.is_image_sequence
-        )
+        return output.is_video or output.is_image_sequence or output.is_still
 
     def _render_preview_frame(self, frame_offset: float) -> None:
         """Draw and show the current state without advancing animation time.
@@ -896,7 +884,7 @@ class Manager(Generic[SceneT]):
     def _legacy_add_frame(
         self, frame: RGBAPixelArray | None, num_frames: int = 1
     ) -> None:
-        """Write frames and advance time for callers of CairoRenderer.add_frame.
+        """Write frames and advance time for callers of SkiaRenderer.add_frame.
 
         Like a play, the frames advance the clock whether or not they are part
         of the output, so that scene time does not depend on the cache. Only

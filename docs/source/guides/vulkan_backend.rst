@@ -2,16 +2,17 @@ Vulkan / Skia backend
 ====================
 
 ManimVK renders the classic Manim object model through Skia's Ganesh backend on
-top of Vulkan.  It is the default renderer for this fork; Cairo remains available
-as an explicit reference rasterizer.
+top of Vulkan, its only renderer.  Scene scripts written for Manim Community run
+unchanged.
 
 Default behaviour
 -----------------
 
-``config.renderer`` defaults to ``"vulkan"``.  The OpenGL renderer, the
-``OpenGL*`` mobject family and the GLSL ``Shader``/``Mesh`` API are removed;
-custom effects use :class:`.SkSLMobject`.  ``--renderer cairo`` requests the
-Cairo reference rasterizer.
+The OpenGL renderer, the ``OpenGL*`` mobject family and the GLSL
+``Shader``/``Mesh`` API are removed; custom effects use :class:`.SkSLMobject`.
+``config.renderer`` and ``--renderer`` still accept ``"cairo"`` and
+``"vulkan"``, as Manim Community scripts and configs use them; both draw with
+Skia/Vulkan.
 
 The renderer keeps one Vulkan device per process and one Skia Ganesh context per
 device.  Vector paths, text, images, point clouds, background-filled
@@ -76,9 +77,11 @@ Known limitations
 - The preview window is read-only.  ``interactive_embed()`` warns and returns;
   mouse and keyboard events are not forwarded.
 - ``fullscreen``, ``window_position`` and ``window_monitor`` are applied by the
-  native preview window, but HiDPI scaling may differ from Cairo's preview.
-- An explicit Cairo request requires the optional ``legacy`` dependencies
-  (``pip install manim[legacy]`` or ``uv sync --extra legacy``).
+  native preview window; HiDPI scaling may differ from Manim Community's.
+- ``ImageMobject.pixel_array`` can be written in place, as in Manim Community:
+  writes by index or with in-place operators upload the new pixels.
+  ``np.copyto`` and ``out=`` arguments are not noticed; assign
+  ``pixel_array`` after using them.
 - Prebuilt native wheels currently target Windows x64.  Building on Linux
   requires a Vulkan loader and the Skia binary cache; macOS additionally needs
   MoltenVK.  See ``native/manim_vk/README.md`` for build commands.

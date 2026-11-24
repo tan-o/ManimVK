@@ -6,5 +6,4 @@ Renderers
 .. autosummary::
    :toctree: ../reference
 
-   ~renderer.cairo.renderer
    ~renderer.skia.renderer

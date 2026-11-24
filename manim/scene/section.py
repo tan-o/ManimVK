@@ -58,8 +58,7 @@ class Section:
     See Also
     --------
     :class:`.DefaultSectionType`
-    :meth:`.CairoRenderer.update_skipping_status`
-    :meth:`.CairoRenderer.update_skipping_status`
+    :meth:`.SkiaRenderer.update_skipping_status`
     """
 
     def __init__(
