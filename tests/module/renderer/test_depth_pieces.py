@@ -2,8 +2,8 @@
 
 The camera orders depth pieces (subpaths of depth-tested VMobjects, triangles
 of mesh surfaces) back to front in depth slices; the Skia drawing context sends
-each run of pieces of one mobject as one native draw.  The native module is a
-recorder here, so these check calls, not pixels.
+all VMobject runs between two mesh runs in one native call.  The native module
+is a recorder here, so these check calls, not pixels.
 """
 
 from __future__ import annotations
@@ -50,24 +50,31 @@ def test_depth_pieces_are_subpath_centers():
     assert _hairs(10).deactivate_depth_test().get_depth_pieces() is None
 
 
-def test_draw_items_order_far_to_near_and_flat_last():
+def test_draw_order_runs_far_to_near_and_flat_last():
     camera = ThreeDCamera(phi=0, theta=-90 * DEGREES)  # looking down the z axis
     hairs = _hairs(200)
     flat = Square()
-    items = camera.get_draw_items([flat, hairs], {id(flat): 0, id(hairs): 1})
-    assert items[-1][0] is flat and items[-1][1] is None
-    pieces = np.concatenate([p for m, p in items if m is hairs])
+    order = camera.get_draw_order([flat, hairs], {id(flat): 0, id(hairs): 1})
+    runs = list(order.runs())
+    assert runs[-1][0] is flat
+    assert runs[-1][1] is None
+    pieces = np.concatenate([p for m, p in runs if m is hairs])
     assert sorted(pieces.tolist()) == list(range(200))
     # Runs come far to near: the z of their pieces increases.
-    run_depth = [hairs.get_depth_pieces()[p][:, 2].mean() for m, p in items if m is hairs]
+    run_depth = [
+        hairs.get_depth_pieces()[p][:, 2].mean() for m, p in runs if m is hairs
+    ]
     assert run_depth == sorted(run_depth)
     assert len(run_depth) <= camera.depth_slices
 
 
-def test_without_pieces_draw_items_keep_display_order():
+def test_without_pieces_draw_order_keeps_display_order():
     camera = ThreeDCamera()
     mobjects = [Square(), Square().shift(2 * np.array([1.0, 0, 0]))]
-    assert camera.get_draw_items(mobjects) == [(mobjects[0], None), (mobjects[1], None)]
+    assert list(camera.get_draw_order(mobjects).runs()) == [
+        (mobjects[0], None),
+        (mobjects[1], None),
+    ]
 
 
 def test_mesh_surface_follows_the_transformed_surface():
@@ -76,7 +83,9 @@ def test_mesh_surface_follows_the_transformed_surface():
     assert mesh.resolution == (8, 4)
     assert len(mesh.points) == 9 * 5
     assert mesh.triangles.shape == (2 * 8 * 4, 3)
-    np.testing.assert_allclose(np.linalg.norm(mesh.points - [1, 0, 0], axis=1), 2, atol=1e-9)
+    np.testing.assert_allclose(
+        np.linalg.norm(mesh.points - [1, 0, 0], axis=1), 2, atol=1e-9
+    )
     assert mesh.get_depth_pieces().shape == (64, 3, 3)
 
 
@@ -84,7 +93,15 @@ def test_mesh_layers_blend_base_highlight_and_shadow():
     mesh = MeshSurface(Sphere(resolution=(6, 3)), shading=(0.3, 0.2, 0.4))
     positions, uvs, colors = mesh.get_shaded_mesh(ThreeDCamera(), np.array([0, 5]))
     # Two triangles, three layers each, three vertices per layer.
-    assert positions.shape == (18, 3) and uvs.shape == (18, 2) and colors.shape == (18, 4)
+    assert (
+        positions.shape == (18, 3)
+    )
+    assert (
+        uvs.shape == (18, 2)
+    )
+    assert (
+        colors.shape == (18, 4)
+    )
     assert np.all(colors[:3, 3] == 1)  # the base colour is opaque
     np.testing.assert_allclose(colors[:3, :3], np.tile(mesh.color.to_rgb(), (3, 1)))
     unshaded = MeshSurface(Sphere(resolution=(6, 3)), shading=(0, 0, 0))
@@ -121,14 +138,23 @@ class _Target:
 
         return record
 
-    def set_cubic_path(self, points, subpaths):
-        self.calls["set_cubic_path"] += 1
-        self.calls["subpaths"] += len(subpaths)
+    def draw_vmobjects(self, objects, runs, parts):
+        self.calls["draw_vmobjects"] += 1
+        assert runs.dtype == np.int64
+        assert runs.shape[1] == 3
+        assert parts.dtype == np.int64
+        for index, start, end in runs.tolist():
+            self.calls["subpaths"] += (
+                end - start if end > start else len(objects[index][1])
+            )
 
-    def draw_textured_mesh(self, key, texture, width, height, positions, uvs, colors, alpha, occlude):
+    def draw_textured_mesh(
+        self, key, texture, width, height, positions, uvs, colors, alpha, occlude
+    ):
         self.calls["draw_textured_mesh"] += 1
         self.calls["mesh_vertices"] += len(positions)
-        assert positions.dtype == np.float32 and positions.shape[1] == 2
+        assert positions.dtype == np.float32
+        assert positions.shape[1] == 2
         assert len(positions) == len(uvs) == len(colors)
         if occlude is not None:
             self.calls["occlude"] += 1
@@ -181,8 +207,8 @@ def test_hairs_and_mesh_draw_in_few_runs(calls, tmp_path):
     # Every hair and every triangle is drawn once ...
     assert calls["subpaths"] == 3000
     assert calls["mesh_vertices"] == 2 * 12 * 6 * 3 * 3
-    # ... in a few dozen draws, not one per piece.
-    assert calls["set_cubic_path"] <= ThreeDCamera.depth_slices
+    # ... in a few dozen calls, not one per piece.
+    assert calls["draw_vmobjects"] <= ThreeDCamera.depth_slices
     assert calls["draw_textured_mesh"] <= ThreeDCamera.depth_slices
     # The translucent sphere hides what is behind it.
     assert calls["occlude"] == calls["draw_textured_mesh"]

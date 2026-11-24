@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import itertools as it
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import manim_core
 import numpy as np
 from PIL import Image
 
+from manim.camera import DrawOrder
 from manim.constants import CapStyleType, LineJointType
 from manim.mobject.mobject import Mobject
 from manim.mobject.sksl import SkSLMobject
 from manim.mobject.three_d.mesh_surface import MeshSurface
-from manim.mobject.types.image_mobject import AbstractImageMobject, ImageMobjectFromCamera
+from manim.mobject.types.image_mobject import (
+    AbstractImageMobject,
+    ImageMobjectFromCamera,
+)
 from manim.mobject.types.point_cloud_mobject import PMobject
 from manim.mobject.types.vectorized_mobject import VMobject
 
@@ -57,13 +61,62 @@ _SAMPLING = {
 # as a vertical line.
 _COORDINATE_LIMIT = 1e5
 
-_ImageResolver = Callable[[ImageMobjectFromCamera], "SkiaRenderTarget | np.ndarray | None"]
+_ImageResolver = Callable[
+    [ImageMobjectFromCamera], "SkiaRenderTarget | np.ndarray | None"
+]
+
+# Kinds of mobject, each drawn its own way.
+_OTHER, _VMOBJECT, _BACKGROUND_COLORED, _MESH, _SKSL, _POINT_CLOUD, _IMAGE = range(7)
+
+
+def _kind(mobject: Mobject) -> int:
+    if isinstance(mobject, SkSLMobject):
+        return _SKSL
+    if isinstance(mobject, MeshSurface):
+        return _MESH
+    if isinstance(mobject, VMobject):
+        return _BACKGROUND_COLORED if mobject.get_background_image() else _VMOBJECT
+    if isinstance(mobject, PMobject):
+        return _POINT_CLOUD
+    if isinstance(mobject, (AbstractImageMobject, ImageMobjectFromCamera)):
+        return _IMAGE
+    return _OTHER
+
+
+def _slice(order: DrawOrder, start: int, end: int) -> DrawOrder:
+    return order._replace(
+        owner=order.owner[start:end],
+        start=order.start[start:end],
+        end=order.end[start:end],
+    )
+
+
+def _single(vmobject: VMobject, pieces: np.ndarray | None) -> DrawOrder:
+    """A draw order of one run: ``pieces`` of ``vmobject``, or all of it."""
+    parts = (
+        np.zeros(0, dtype=np.int64)
+        if pieces is None
+        else np.asarray(pieces, dtype=np.int64)
+    )
+    return DrawOrder(
+        [vmobject],
+        np.zeros(1, dtype=np.int64),
+        np.zeros(1, dtype=np.int64),
+        np.array([len(parts)], dtype=np.int64),
+        parts,
+    )
 
 
 class SkiaDrawingContext:
     """Draw mobjects into one renderer-owned target using one camera."""
 
-    def __init__(self, *, camera: Camera, target: SkiaRenderTarget, image_resolver: _ImageResolver) -> None:
+    def __init__(
+        self,
+        *,
+        camera: Camera,
+        target: SkiaRenderTarget,
+        image_resolver: _ImageResolver,
+    ) -> None:
         self.camera = camera
         self.target = target
         self.image_resolver = image_resolver
@@ -76,27 +129,12 @@ class SkiaDrawingContext:
         excluded_mobjects: list[Mobject] | None = None,
     ) -> None:
         self.target._ensure_open()
-        display_funcs: dict[type[Mobject], Callable[[list[Any]], None]] = {
-            SkSLMobject: self._display_sksl_mobjects,
-            VMobject: self._display_vectorized_items,
-            MeshSurface: self._display_mesh_surfaces,
-            PMobject: self._display_point_cloud_mobjects,
-            ImageMobjectFromCamera: self._display_image_mobjects,
-            AbstractImageMobject: self._display_image_mobjects,
-            Mobject: lambda batch: None,
-        }
-        takes_items = {VMobject, MeshSurface}
-
-        def type_or_raise(item) -> type[Mobject]:
-            for mobject_type in display_funcs:
-                if isinstance(item[0], mobject_type):
-                    return mobject_type
-            raise TypeError(
-                f"Displaying an object of class {type(item[0]).__name__} is not supported",
-            )
-
         mobjects = list(mobjects)
-        roots = {id(member): index for index, root in enumerate(mobjects) for member in root.get_family()}
+        roots = {
+            id(member): index
+            for index, root in enumerate(mobjects)
+            for member in root.get_family()
+        }
         self._subpath_tables: dict[int, tuple] = {}
         self._vertex_layers: dict[int, tuple] = {}
         with self.camera._drawing():
@@ -105,60 +143,144 @@ class SkiaDrawingContext:
                 include_submobjects=include_submobjects,
                 excluded_mobjects=excluded_mobjects,
             )
-            items = self.camera.get_draw_items(to_display, roots)
-            for group_type, group in it.groupby(items, type_or_raise):
+            order = self.camera.get_draw_order(to_display, roots)
+            if not len(order.owner):
+                return
+            # Consecutive runs of one kind of mobject are drawn together.
+            kinds = np.array(
+                [_kind(mobject) for mobject in order.mobjects], dtype=np.int64
+            )[order.owner]
+            starts = np.flatnonzero(np.diff(kinds, prepend=-1))
+            ends = np.append(starts[1:], len(kinds))
+            for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+                self._display_runs(int(kinds[start]), order, start, end)
+
+    def _display_runs(self, kind: int, order: DrawOrder, start: int, end: int) -> None:
+        if kind == _VMOBJECT:
+            self._display_vmobject_runs(order, start, end)
+            return
+        runs = list(_slice(order, start, end).runs())
+        if kind == _BACKGROUND_COLORED:
+            # Whole runs sharing an image share one upload of it.
+            for image, group in it.groupby(
+                runs,
+                lambda run: run[0].get_background_image() if run[1] is None else None,
+            ):
                 group = list(group)
-                if group_type in takes_items:
-                    display_funcs[group_type](group)
+                if image:
+                    self._display_background_colored_vmobjects(
+                        image, [vmobject for vmobject, _ in group]
+                    )
                 else:
-                    display_funcs[group_type]([mobject for mobject, _ in group])
+                    for vmobject, pieces in group:
+                        self._display_vmobject_runs(_single(vmobject, pieces), 0, 1)
+        elif kind == _MESH:
+            for surface, pieces in runs:
+                self._display_mesh_surface(surface, pieces)
+        elif kind == _SKSL:
+            self._display_sksl_mobjects([mobject for mobject, _ in runs])
+        elif kind == _POINT_CLOUD:
+            self._display_point_cloud_mobjects([mobject for mobject, _ in runs])
+        elif kind == _IMAGE:
+            self._display_image_mobjects([mobject for mobject, _ in runs])
 
     # -- vectorized mobjects ---------------------------------------------
 
-    def _display_vectorized_items(self, items) -> None:
-        """Draw whole VMobjects in runs and depth pieces one at a time."""
-        whole = []
-        for vmobject, pieces in items:
-            if pieces is None:
-                whole.append(vmobject)
-                continue
-            self._display_vectorized_mobjects(whole)
-            whole = []
-            self._display_vmobject_pieces(vmobject, pieces)
-        self._display_vectorized_mobjects(whole)
-
-    def _display_vectorized_mobjects(self, vmobjects: list[VMobject]) -> None:
-        for image, run in it.groupby(vmobjects, lambda vmobject: vmobject.get_background_image()):
-            if image:
-                self._display_background_colored_vmobjects(image, list(run))
-            else:
-                context = self.target.get_context(self.camera)
-                for vmobject in run:
-                    self._set_path(context, vmobject)
-                    self._paint(context, vmobject)
-
-    def _paint(self, context, vmobject: VMobject) -> None:
-        """Background stroke, fill, then stroke, on the current path."""
-        self._apply_stroke(context, vmobject, background=True)
-        self._apply_fill(context, vmobject)
-        self._apply_stroke(context, vmobject)
-
-    def _set_path(self, context, vmobject: VMobject) -> None:
-        """Send a VMobject's whole path in one native call; manim_core splits
-        it into subpaths and finds the closed ones.
+    def _display_vmobject_runs(self, order: DrawOrder, start: int, end: int) -> None:
+        """Draw VMobject runs in one native call: each VMobject once, with its
+        points, subpaths and paints, then the runs in order.
         """
-        points = self.camera.transform_points_pre_display(vmobject, vmobject.points)
-        points, subpaths = manim_core.cubic_subpaths(
-            points,
+        owners = order.owner[start:end]
+        run_start, run_end = order.start[start:end], order.end[start:end]
+        slots, inverse = np.unique(owners, return_inverse=True)
+        pieced = np.zeros(len(slots), dtype=bool)
+        np.logical_or.at(pieced, inverse, run_end > run_start)
+        objects = [
+            self._vmobject_spec(order.mobjects[owner], bool(has_pieces))
+            for owner, has_pieces in zip(slots.tolist(), pieced.tolist(), strict=True)
+        ]
+        runs = np.ascontiguousarray(
+            np.stack([inverse.astype(np.int64), run_start, run_end], axis=1)
+        )
+        context = self.target.get_context(self.camera)
+        context.draw_vmobjects(
+            objects, runs, np.ascontiguousarray(order.parts, dtype=np.int64)
+        )
+
+    def _vmobject_spec(self, vmobject: VMobject, pieced: bool) -> tuple:
+        """``(points, subpaths, paints)`` for :meth:`draw_vmobjects`.
+
+        Depth pieces index the subpaths split on the 3D points
+        (:meth:`_subpath_table`); a whole VMobject uses manim_core's split.
+        """
+        points, subpaths = (
+            self._subpath_table(vmobject) if pieced else self._whole_path(vmobject)
+        )
+        paints = []
+        gradient = None
+        for kind in ("background_stroke", "fill", "stroke"):
+            if kind == "fill":
+                rgbas = self.camera.get_fill_rgbas(vmobject)
+                if not np.any(rgbas[:, 3]):
+                    # A transparent fill draws nothing; skip tessellating the path.
+                    continue
+                width = None
+            else:
+                background = kind == "background_stroke"
+                width = vmobject.get_stroke_width(background)
+                if width == 0:
+                    continue
+                rgbas = self.camera.get_stroke_rgbas(vmobject, background=background)
+                width = float(width * self.target.settings.line_width_multiple)
+            line = None
+            if len(rgbas) > 1:
+                if gradient is None:
+                    ends = self.camera.transform_points_pre_display(
+                        vmobject, vmobject.get_gradient_start_and_end_points()
+                    )
+                    gradient = (
+                        float(ends[0][0]),
+                        float(ends[0][1]),
+                        float(ends[1][0]),
+                        float(ends[1][1]),
+                    )
+                line = gradient
+            # Manim stores straight RGBA, as Skia's colours take it.
+            stops = [
+                (float(offset), float(r), float(g), float(b), float(a))
+                for (r, g, b, a), offset in zip(
+                    rgbas, np.linspace(0, 1, len(rgbas)), strict=True
+                )
+            ]
+            paints.append(
+                (
+                    width,
+                    _LINE_JOIN_MAP[vmobject.joint_type],
+                    _CAP_STYLE_MAP[vmobject.cap_style],
+                    stops,
+                    line,
+                )
+            )
+        return points, subpaths, paints
+
+    def _whole_path(self, vmobject: VMobject) -> tuple[np.ndarray, np.ndarray]:
+        """Projected points and ``(start, end, closed)`` subpath rows of a
+        whole VMobject; manim_core splits it and finds the closed subpaths.
+        """
+        return manim_core.cubic_subpaths(
+            self.camera.transform_points_pre_display(vmobject, vmobject.points),
             vmobject.n_points_per_cubic_curve,
             2,
             vmobject.tolerance_for_point_equality,
             _COORDINATE_LIMIT,
         )
-        context.set_cubic_path(points, subpaths)
 
-    def _subpath_table(self, vmobject: VMobject):
-        """Projected points and (start, end, closed) per subpath, once per frame.
+    def _set_path(self, context, vmobject: VMobject) -> None:
+        context.set_cubic_path(*self._whole_path(vmobject))
+
+    def _subpath_table(self, vmobject: VMobject) -> tuple[np.ndarray, np.ndarray]:
+        """Projected points and ``(start, end, closed)`` rows per subpath, once
+        per frame.
 
         Subpaths are split on the 3D points, as in
         :meth:`.VMobject.get_depth_pieces`, so piece indices line up.
@@ -176,60 +298,29 @@ class SkiaDrawingContext:
             ),
             dtype=np.float64,
         )
-        if len(points) != len(vmobject.points):
-            table = []
+        if len(points) != len(vmobject.points) or not len(split):
+            table = np.zeros((0, 3), dtype=np.int64)
         else:
             starts, ends = split[:, 0], split[:, 1]
             first, last = points[starts, :2], points[ends - 1, :2]
             tolerance = vmobject.tolerance_for_point_equality
-            closed = np.all(np.abs(first - last) <= tolerance + 1e-5 * np.abs(last), axis=1)
-            table = list(zip(starts.tolist(), ends.tolist(), closed.tolist(), strict=True))
+            closed = np.all(
+                np.abs(first - last) <= tolerance + 1e-5 * np.abs(last), axis=1
+            )
+            table = np.ascontiguousarray(
+                np.stack([starts, ends, closed], axis=1), dtype=np.int64
+            )
         self._subpath_tables[key] = (vmobject, points, table)
         return points, table
-
-    def _display_vmobject_pieces(self, vmobject: VMobject, pieces) -> None:
-        points, table = self._subpath_table(vmobject)
-        if not table:
-            return
-        context = self.target.get_context(self.camera)
-        context.set_cubic_path(points, [table[index] for index in pieces.tolist()])
-        self._paint(context, vmobject)
-
-    def _set_source(self, context, rgbas, vmobject: VMobject) -> None:
-        if len(rgbas) == 1:
-            # Manim stores straight RGBA, as set_source_rgba takes it.
-            context.set_source_rgba(*rgbas[0])
-            return
-        points = vmobject.get_gradient_start_and_end_points()
-        points = self.camera.transform_points_pre_display(vmobject, points)
-        stops = [
-            (offset, rgba[0], rgba[1], rgba[2], rgba[3])
-            for rgba, offset in zip(rgbas, np.linspace(0, 1, len(rgbas)), strict=True)
-        ]
-        context.set_source_linear_gradient(points[0][0], points[0][1], points[1][0], points[1][1], stops)
-
-    def _apply_fill(self, context, vmobject: VMobject) -> None:
-        rgbas = self.camera.get_fill_rgbas(vmobject)
-        if not np.any(rgbas[:, 3]):
-            # A transparent fill draws nothing; skip tessellating the path.
-            return
-        self._set_source(context, rgbas, vmobject)
-        context.fill_preserve()
 
     def _set_stroke_style(self, context, vmobject: VMobject, width: float) -> None:
         context.set_line_width(width * self.target.settings.line_width_multiple)
         context.set_line_join(_LINE_JOIN_MAP[vmobject.joint_type])
         context.set_line_cap(_CAP_STYLE_MAP[vmobject.cap_style])
 
-    def _apply_stroke(self, context, vmobject: VMobject, background: bool = False) -> None:
-        width = vmobject.get_stroke_width(background)
-        if width == 0:
-            return
-        self._set_source(context, self.camera.get_stroke_rgbas(vmobject, background=background), vmobject)
-        self._set_stroke_style(context, vmobject, width)
-        context.stroke_preserve()
-
-    def _display_background_colored_vmobjects(self, image, vmobjects: list[VMobject]) -> None:
+    def _display_background_colored_vmobjects(
+        self, image, vmobjects: list[VMobject]
+    ) -> None:
         """Draw vmobjects coloured by a background image: each fill and stroke
         paints with the image, faded by the opacity it would have.
         """
@@ -247,10 +338,14 @@ class SkiaDrawingContext:
                     width = vmobject.get_stroke_width(background_stroke)
                     if width == 0:
                         continue
-                    rgbas = self.camera.get_stroke_rgbas(vmobject, background=background_stroke)
+                    rgbas = self.camera.get_stroke_rgbas(
+                        vmobject, background=background_stroke
+                    )
                 if not np.any(rgbas[:, 3]):
                     continue
-                self.target.set_source_image(background, (1.0, 1.0, 1.0, float(rgbas[:, 3].mean())), batch)
+                self.target.set_source_image(
+                    background, (1.0, 1.0, 1.0, float(rgbas[:, 3].mean())), batch
+                )
                 if width is None:
                     context.fill_preserve()
                 else:
@@ -259,38 +354,41 @@ class SkiaDrawingContext:
 
     # -- meshes, SkSL, point clouds and images ------------------------------
 
-    def _display_mesh_surfaces(self, items) -> None:
-        for surface, pieces in items:
-            key = id(surface)
-            layers = self._vertex_layers.get(key)
-            if layers is None or layers[0] is not surface:
-                layers = (surface, surface.get_vertex_layers(self.camera))
-                self._vertex_layers[key] = layers
-            mesh = surface.get_shaded_mesh(self.camera, pieces, layers[1])
-            if mesh is None:
-                continue
-            positions, uvs, colors = mesh
-            positions = self.camera.transform_points_pre_display(surface, positions)
-            # Pieces only come from a depth-sorting camera.  There a translucent
-            # surface clears what was drawn behind it to the background first,
-            # as a depth buffer would hide it.
-            occlude = None
-            if pieces is not None and surface.get_opacity() < 1:
-                occlude = tuple(
-                    float(c)
-                    for c in self.camera.background_color.to_rgba_with_alpha(self.camera.background_opacity)
+    def _display_mesh_surface(
+        self, surface: MeshSurface, pieces: np.ndarray | None
+    ) -> None:
+        key = id(surface)
+        layers = self._vertex_layers.get(key)
+        if layers is None or layers[0] is not surface:
+            layers = (surface, surface.get_vertex_layers(self.camera))
+            self._vertex_layers[key] = layers
+        mesh = surface.get_shaded_mesh(self.camera, pieces, layers[1])
+        if mesh is None:
+            return
+        positions, uvs, colors = mesh
+        positions = self.camera.transform_points_pre_display(surface, positions)
+        # Pieces only come from a depth-sorting camera.  There a translucent
+        # surface clears what was drawn behind it to the background first,
+        # as a depth buffer would hide it.
+        occlude = None
+        if pieces is not None and surface.get_opacity() < 1:
+            occlude = tuple(
+                float(c)
+                for c in self.camera.background_color.to_rgba_with_alpha(
+                    self.camera.background_opacity
                 )
-            self.target.get_context(self.camera)
-            texture, texture_key = surface.get_texture_atlas()
-            self.target.draw_textured_mesh(
-                texture_key,
-                texture,
-                np.ascontiguousarray(positions[:, :2], dtype=np.float32),
-                np.ascontiguousarray(uvs, dtype=np.float32),
-                np.ascontiguousarray(colors, dtype=np.float32),
-                surface.get_opacity(),
-                occlude,
             )
+        self.target.get_context(self.camera)
+        texture, texture_key = surface.get_texture_atlas()
+        self.target.draw_textured_mesh(
+            texture_key,
+            texture,
+            np.ascontiguousarray(positions[:, :2], dtype=np.float32),
+            np.ascontiguousarray(uvs, dtype=np.float32),
+            np.ascontiguousarray(colors, dtype=np.float32),
+            surface.get_opacity(),
+            occlude,
+        )
 
     def _display_sksl_mobjects(self, mobjects: list[SkSLMobject]) -> None:
         for mobject in mobjects:
@@ -310,7 +408,9 @@ class SkiaDrawingContext:
         rgbas = np.asarray(pmobject.rgbas, dtype=np.float64).reshape(-1, 4)
         if len(rgbas) == 0:
             return
-        pixel_coords = self._points_to_subpixel_coords(pmobject, points).astype(np.int64)
+        pixel_coords = self._points_to_subpixel_coords(pmobject, points).astype(
+            np.int64
+        )
         # The block covers pixels x + k for k in range(-size // 2 + 1, size // 2 + 1).
         size = max(1, int(self._adjusted_thickness(pmobject.stroke_width)))
         low, high = -size // 2 + 1, size // 2 + 1
@@ -325,11 +425,11 @@ class SkiaDrawingContext:
             & (pixel_coords[:, 1] >= 0)
             & (pixel_coords[:, 1] < settings.pixel_height)
         )
-        entries = [
-            (float(x), float(y), int(r), int(g), int(b), int(a))
-            for (x, y), (r, g, b, a) in zip(centers[on_screen], int_rgbas[on_screen], strict=True)
-        ]
-        self.target.draw_point_pixels(entries, size / 2)
+        self.target.draw_point_pixels(
+            np.ascontiguousarray(centers[on_screen], dtype=np.float32),
+            np.ascontiguousarray(int_rgbas[on_screen]),
+            size / 2,
+        )
 
     def _adjusted_thickness(self, thickness: float) -> float:
         """A point size in pixels, scaled with the target from its base size."""
@@ -338,12 +438,16 @@ class SkiaDrawingContext:
         target_sum = settings.pixel_height + settings.pixel_width
         return 1 + (thickness - 1) * base_sum / target_sum
 
-    def _display_image_mobjects(self, image_mobjects: list[AbstractImageMobject]) -> None:
+    def _display_image_mobjects(
+        self, image_mobjects: list[AbstractImageMobject]
+    ) -> None:
         for image_mobject in image_mobjects:
             self._display_image_mobject(image_mobject)
 
     def _display_image_mobject(self, image_mobject: AbstractImageMobject) -> None:
-        target_coords = self._points_to_subpixel_coords(image_mobject, image_mobject.points)
+        target_coords = self._points_to_subpixel_coords(
+            image_mobject, image_mobject.points
+        )
         # ImageMobject points are top-left, top-right, bottom-left, bottom-right.
         quad = [(float(x), float(y)) for x, y in target_coords[[0, 1, 3, 2]]]
         sampling = _SAMPLING.get(image_mobject.resampling_algorithm, 2)
@@ -369,7 +473,9 @@ class SkiaDrawingContext:
             mix,
         )
 
-    def _points_to_subpixel_coords(self, mobject: Mobject, points: Point3D_Array) -> np.ndarray:
+    def _points_to_subpixel_coords(
+        self, mobject: Mobject, points: Point3D_Array
+    ) -> np.ndarray:
         """Device-pixel coordinates of ``points``, with the canvas matrix's view
         center (ThreeDCamera.project_points() has already removed frame_center).
         """
@@ -377,8 +483,12 @@ class SkiaDrawingContext:
         shifted_points = points - self.camera.get_view_transform_center()
         settings = self.target.settings
         result = np.zeros((len(points), 2))
-        result[:, 0] = shifted_points[:, 0] * settings.pixel_width / self.camera.frame_width + settings.pixel_width / 2
+        result[:, 0] = (
+            shifted_points[:, 0] * settings.pixel_width / self.camera.frame_width
+            + settings.pixel_width / 2
+        )
         result[:, 1] = (
-            -shifted_points[:, 1] * settings.pixel_height / self.camera.frame_height + settings.pixel_height / 2
+            -shifted_points[:, 1] * settings.pixel_height / self.camera.frame_height
+            + settings.pixel_height / 2
         )
         return result

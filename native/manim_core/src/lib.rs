@@ -143,7 +143,8 @@ fn lerp<'py>(
     Ok(result.into_pyarray(py))
 }
 
-/// Subpaths of a cubic Bezier path as `(start, end, closed)` point ranges.
+/// Subpaths of a cubic Bezier path as `(k, 3)` int64 rows of
+/// `(start, end, closed)` point ranges.
 ///
 /// See `geometry::cubic_subpaths`; this is
 /// `VMobject.get_subpath_split_indices_from_points` plus the closing test the
@@ -159,7 +160,7 @@ fn cubic_subpaths<'py>(
     n_dims: usize,
     atol: f64,
     limit: f64,
-) -> PyResult<(Bound<'py, PyArray2<f64>>, Vec<(usize, usize, bool)>)> {
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
     let view = points.as_array();
     if view.ncols() < n_dims || n_dims == 0 || curve_size < 2 {
         return Err(PyValueError::new_err("bad points, curve_size or n_dims"));
@@ -169,7 +170,11 @@ fn cubic_subpaths<'py>(
         geometry::tame_huge_curves(&mut owned, curve_size, limit);
     }
     let subpaths = geometry::cubic_subpaths(owned.view(), curve_size, n_dims, atol);
-    Ok((owned.into_pyarray(py), subpaths))
+    let table = Array2::from_shape_fn((subpaths.len(), 3), |(row, column)| {
+        let (start, end, closed) = subpaths[row];
+        [start as i64, end as i64, closed as i64][column]
+    });
+    Ok((owned.into_pyarray(py), table.into_pyarray(py)))
 }
 
 /// A copy of `points` with curves beyond `limit` as clamped straight lines;
@@ -246,7 +251,7 @@ fn arrow_points<'py>(
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a function is added or changes its signature or behaviour.
-const API_VERSION: u32 = 1;
+const API_VERSION: u32 = 2;
 
 #[pymodule]
 fn manim_core(m: &Bound<'_, PyModule>) -> PyResult<()> {

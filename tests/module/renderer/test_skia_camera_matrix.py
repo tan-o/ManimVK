@@ -10,8 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from manim.camera import Camera
-from manim.renderer.skia.target import _ImageFiles, _RasterSettings
-from manim.renderer.skia.target import SkiaRenderTarget
+from manim.renderer.skia.target import SkiaRenderTarget, _ImageFiles, _RasterSettings
 
 
 class _RecordingNative:

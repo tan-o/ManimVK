@@ -1,7 +1,7 @@
 """Skia frames start from GPU-resident layers instead of uploading pixels.
 
 Runs without a GPU: the native module is replaced by a recorder, so these tests
-check the renderer's calls (one path call per VMobject, one static capture per
+check the renderer's calls (one display-list call per frame, one static capture per
 play, no per-frame pixel uploads), not pixels.
 """
 
@@ -81,7 +81,9 @@ def calls(monkeypatch):
 
 class _Moving(Scene):
     def construct(self):
-        self.add(VGroup(*[Square().shift(i * 0.5 * np.array([1.0, 0, 0])) for i in range(4)]))
+        self.add(
+            VGroup(*[Square().shift(i * 0.5 * np.array([1.0, 0, 0])) for i in range(4)])
+        )
         tracker = ValueTracker(0)
         vectors = [Vector([1, 0, 0]) for _ in range(5)]
         for index, vector in enumerate(vectors):
@@ -111,9 +113,9 @@ def test_static_layer_is_captured_once_per_play_and_never_uploaded(calls, tmp_pa
     assert calls["capture_static_layer"] == 2
     assert calls["load_pixels"] == 0
     assert calls["restore_static_layer"] >= frames
-    # Paths go through one native call per VMobject, never per point.
-    assert calls["set_cubic_path"] > 0
-    assert calls["move_to"] == calls["curve_to"] == 0
+    # All VMobjects of a frame go in one native call, never per point.
+    assert calls["draw_vmobjects"] == calls["restore_static_layer"]
+    assert calls["move_to"] == calls["curve_to"] == calls["set_cubic_path"] == 0
 
 
 class _OpRecorder:
@@ -169,7 +171,12 @@ def _reference_path_ops(recorder: _OpRecorder, camera, vmobject) -> None:
 
 @pytest.mark.parametrize(
     "mobject",
-    [Circle(), Square(), Vector([1, 2, 0]), Circle().pointwise_become_partial(Circle(), 0.1, 0.6)],
+    [
+        Circle(),
+        Square(),
+        Vector([1, 2, 0]),
+        Circle().pointwise_become_partial(Circle(), 0.1, 0.6),
+    ],
 )
 def test_one_path_call_describes_the_reference_path(mobject):
     from manim.camera import Camera
@@ -190,8 +197,12 @@ def test_one_path_call_describes_the_reference_path(mobject):
 class _ImageCalls(_RecordingTarget):
     draws: list[tuple] = []
 
-    def draw_image_quad(self, key, pixels, width, height, quad, alpha, sampling, mix=None):
-        self.draws.append((key, id(pixels), alpha, None if mix is None else (mix[0], mix[2])))
+    def draw_image_quad(
+        self, key, pixels, width, height, quad, alpha, sampling, mix=None
+    ):
+        self.draws.append(
+            (key, id(pixels), alpha, None if mix is None else (mix[0], mix[2]))
+        )
 
 
 class _ImageDevice(_RecordingDevice):

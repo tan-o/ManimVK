@@ -5,6 +5,7 @@
 //! mobjects (paths, images, point clouds, SkSL effects) and reads frames back.
 
 mod textures;
+mod vmobjects;
 mod window;
 
 use std::cell::RefCell;
@@ -17,9 +18,8 @@ use ash::vk;
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use skia_safe::gradient::{Colors as GradientColors, Gradient, Interpolation};
 use skia_safe::image::{AsyncReadResult, RescaleGamma, RescaleMode};
-use skia_safe::paint::{Cap, Join, Style};
+use skia_safe::paint::Style;
 use skia_safe::runtime_effect::RuntimeShaderBuilder;
 use skia_safe::vertices::{VertexMode, Vertices};
 use skia_safe::{
@@ -571,15 +571,11 @@ impl SkiaTarget {
     /// Replace the current path with a whole cubic-Bezier path in one call.
     ///
     /// `points` is a C-contiguous float64 array of shape (n, k), k >= 2, in
-    /// scene coordinates (the canvas matrix maps them to pixels).  Each entry
-    /// of `subpaths` is (start, end, closed): points start..end form anchors
-    /// and handles a0 h0 h1 a1 a1' h ... with four points per curve, exactly
-    /// as Cairo's move_to/curve_to loop consumes them.
-    fn set_cubic_path(
-        &mut self,
-        points: &Bound<PyAny>,
-        subpaths: Vec<(usize, usize, bool)>,
-    ) -> PyResult<()> {
+    /// scene coordinates (the canvas matrix maps them to pixels).  `subpaths`
+    /// is `(k, 3)` int64 rows of (start, end, closed): points start..end form
+    /// anchors and handles a0 h0 h1 a1 a1' h ... with four points per curve.
+    fn set_cubic_path(&mut self, points: &Bound<PyAny>, subpaths: &Bound<PyAny>) -> PyResult<()> {
+        let subpaths = vmobjects::subpath_table(subpaths)?;
         let buffer = PyBuffer::<f64>::get(points)
             .map_err(|error| PyValueError::new_err(format!("path points: {error}")))?;
         let shape = buffer.shape().to_vec();
@@ -590,27 +586,14 @@ impl SkiaTarget {
         let data = buffer
             .as_slice(points.py())
             .ok_or_else(|| PyValueError::new_err("path points must be C-contiguous"))?;
-        let at = |index: usize| {
-            Point::new(
-                data[index * stride].get() as f32,
-                data[index * stride + 1].get() as f32,
-            )
-        };
+        let points: Vec<Point> = data
+            .chunks_exact(stride)
+            .take(count)
+            .map(|row| Point::new(row[0].get() as f32, row[1].get() as f32))
+            .collect();
         self.path.reset();
         for (start, end, closed) in subpaths {
-            if end > count || end < start + 4 {
-                continue;
-            }
-            self.path.move_to(at(start));
-            let mut index = start;
-            while index + 4 <= end {
-                self.path
-                    .cubic_to(at(index + 1), at(index + 2), at(index + 3));
-                index += 4;
-            }
-            if closed {
-                self.path.close();
-            }
+            vmobjects::add_subpath(&mut self.path, &points, start, end, closed);
         }
         Ok(())
     }
@@ -653,40 +636,15 @@ impl SkiaTarget {
         Ok(())
     }
 
-    fn set_source_rgba(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
-        self.paint.set_shader(None);
-        self.paint
-            .set_color4f(Color4f::new(red, green, blue, alpha), None);
-    }
-
-    /// `stops` is a list of (offset, red, green, blue, alpha), with offset in 0..=1.
-    fn set_source_linear_gradient(
+    /// Draw VMobjects, whole or as depth pieces, in one call; see
+    /// `vmobjects::draw`.  The canvas matrix maps their scene points.
+    fn draw_vmobjects<'py>(
         &mut self,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-        stops: Vec<(f32, f32, f32, f32, f32)>,
-    ) {
-        if stops.is_empty() {
-            return;
-        }
-        let mut colors = Vec::with_capacity(stops.len());
-        let mut positions = Vec::with_capacity(stops.len());
-        for (offset, red, green, blue, alpha) in stops {
-            colors.push(Color4f::new(red, green, blue, alpha));
-            positions.push(offset);
-        }
-        let gradient_colors =
-            GradientColors::new(&colors, Some(positions.as_slice()), TileMode::Clamp, None);
-        let gradient = Gradient::new(gradient_colors, Interpolation::default());
-        if let Some(shader) = skia_safe::gradient::shaders::linear_gradient(
-            (Point::new(x0, y0), Point::new(x1, y1)),
-            &gradient,
-            None,
-        ) {
-            self.paint.set_shader(shader);
-        }
+        objects: Vec<vmobjects::ObjectSpec<'py>>,
+        runs: &Bound<'py, PyAny>,
+        parts: &Bound<'py, PyAny>,
+    ) -> PyResult<()> {
+        vmobjects::draw(self.surface.canvas(), objects, runs, parts)
     }
 
     fn set_line_width(&mut self, width: f32) {
@@ -694,19 +652,11 @@ impl SkiaTarget {
     }
 
     fn set_line_join(&mut self, join: i32) {
-        self.paint.set_stroke_join(match join {
-            1 => Join::Round,
-            2 => Join::Bevel,
-            _ => Join::Miter,
-        });
+        self.paint.set_stroke_join(vmobjects::join_of(join));
     }
 
     fn set_line_cap(&mut self, cap: i32) {
-        self.paint.set_stroke_cap(match cap {
-            1 => Cap::Round,
-            2 => Cap::Square,
-            _ => Cap::Butt,
-        });
+        self.paint.set_stroke_cap(vmobjects::cap_of(cap));
     }
 
     fn fill_preserve(&mut self) {
@@ -1060,18 +1010,41 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Draw point-cloud pixels directly into the target.  ``points`` contains
-    /// (x, y, r, g, b, a) tuples in device pixel coordinates, and ``half_size``
-    /// is the half extent of the square used for a point.
-    fn draw_point_pixels(&mut self, points: Vec<(f32, f32, u8, u8, u8, u8)>, half_size: f32) {
-        if points.is_empty() {
-            return;
+    /// Draw point-cloud pixels directly into the target: ``centers`` is an
+    /// ``(n, 2)`` float32 array of device pixel coordinates, ``colors`` an
+    /// ``(n, 4)`` uint8 RGBA array, and ``half_size`` the half extent of the
+    /// square drawn for a point.
+    fn draw_point_pixels(
+        &mut self,
+        centers: &Bound<'_, PyAny>,
+        colors: &Bound<'_, PyAny>,
+        half_size: f32,
+    ) -> PyResult<()> {
+        let centers = PyBuffer::<f32>::get(centers)?;
+        let rgba = PyBuffer::<u8>::get(colors)?;
+        if centers.shape().len() != 2
+            || centers.shape()[1] != 2
+            || rgba.shape().len() != 2
+            || rgba.shape()[1] != 4
+            || rgba.shape()[0] != centers.shape()[0]
+        {
+            return Err(PyValueError::new_err(
+                "point pixels need (n, 2) float32 centers and (n, 4) uint8 colors",
+            ));
+        }
+        let py = colors.py();
+        let centers = centers.to_vec(py)?;
+        let rgba = rgba.to_vec(py)?;
+        if centers.is_empty() {
+            return Ok(());
         }
         let half = half_size.max(0.5);
-        let mut positions = Vec::with_capacity(points.len() * 6);
-        let mut colors = Vec::with_capacity(points.len() * 6);
-        for (x, y, r, g, b, a) in points {
-            let color = Color::from_argb(a, r, g, b);
+        let count = centers.len() / 2;
+        let mut positions = Vec::with_capacity(count * 6);
+        let mut colors = Vec::with_capacity(count * 6);
+        for (center, c) in centers.chunks_exact(2).zip(rgba.chunks_exact(4)) {
+            let (x, y) = (center[0], center[1]);
+            let color = Color::from_argb(c[3], c[0], c[1], c[2]);
             let corners = [
                 (x - half, y - half),
                 (x + half, y - half),
@@ -1101,6 +1074,7 @@ impl SkiaTarget {
         canvas.draw_vertices(&vertices, BlendMode::Modulate, &self.paint);
         self.paint.set_anti_alias(true);
         canvas.set_matrix(&self.matrix);
+        Ok(())
     }
 
     /// Flush Ganesh and copy the RGBA surface back to host memory.
@@ -1298,7 +1272,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 1;
+const API_VERSION: u32 = 2;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {

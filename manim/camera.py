@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-__all__ = ["Camera", "MovingCamera", "MultiCamera", "ThreeDCamera"]
+__all__ = ["Camera", "DrawOrder", "MovingCamera", "MultiCamera", "ThreeDCamera"]
 
 import contextlib
 import operator as op
 from collections.abc import Callable, Iterable, Iterator
 from functools import reduce
-from typing import TYPE_CHECKING, Any, Literal, Self, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self, overload
 
 import numpy as np
 
@@ -41,6 +41,41 @@ if TYPE_CHECKING:
         Point3D_Array,
         Point3DLike,
     )
+
+
+class DrawOrder(NamedTuple):
+    """Mobjects in drawing order, as runs held in arrays.
+
+    Run ``k`` draws ``mobjects[owner[k]]``: whole when ``start[k] == end[k]``,
+    otherwise its depth pieces ``parts[start[k]:end[k]]`` (indices into
+    :meth:`.Mobject.get_depth_pieces`).  Arrays, not one Python object per
+    run: a depth-sorted field of arrows has tens of thousands of runs.
+    """
+
+    mobjects: list[Mobject]
+    owner: np.ndarray
+    start: np.ndarray
+    end: np.ndarray
+    parts: np.ndarray
+
+    @classmethod
+    def whole(cls, mobjects: list[Mobject]) -> DrawOrder:
+        """Every mobject drawn whole, in the given order."""
+        zeros = np.zeros(len(mobjects), dtype=np.int64)
+        return cls(
+            mobjects,
+            np.arange(len(mobjects), dtype=np.int64),
+            zeros,
+            zeros,
+            np.zeros(0, dtype=np.int64),
+        )
+
+    def runs(self) -> Iterator[tuple[Mobject, np.ndarray | None]]:
+        """``(mobject, pieces or None)`` per run, for drawing a few runs one by one."""
+        for owner, start, end in zip(
+            self.owner.tolist(), self.start.tolist(), self.end.tolist(), strict=True
+        ):
+            yield self.mobjects[owner], (self.parts[start:end] if end > start else None)
 
 
 class Camera:
@@ -211,17 +246,16 @@ class Camera:
                 mobjects = list_difference_update(mobjects, all_excluded)
         return list(mobjects)
 
-    def get_draw_items(
+    def get_draw_order(
         self,
         mobjects: list[Mobject],
         roots: dict[int, int] | None = None,
-    ) -> list[tuple[Mobject, np.ndarray | None]]:
-        """Pair each mobject from :meth:`get_mobjects_to_display` with the
-        indices of its depth pieces to draw; ``None`` draws it whole.
+    ) -> DrawOrder:
+        """The runs that draw the mobjects from :meth:`get_mobjects_to_display`.
 
         A flat camera draws every mobject whole, in display order.
         """
-        return [(mobject, None) for mobject in mobjects]
+        return DrawOrder.whole(mobjects)
 
     def is_in_frame(self, mobject: Mobject) -> bool:
         """Whether ``mobject`` intersects the camera frame's bounds."""
@@ -415,7 +449,7 @@ class Camera:
         return 0.0 if angles[2] is None else float(angles[2])
 
     @property
-    def animate(self) -> "_CameraAnimate":
+    def animate(self) -> _CameraAnimate:
         return _CameraAnimate(self)
 
     @property
@@ -435,19 +469,28 @@ class Camera:
         callable for callers that inspect it, but do not invent a second update
         loop outside the scene manager.
         """
-        self._camera_updaters = [*getattr(self, "_camera_updaters", []), update_function]
+        self._camera_updaters = [
+            *getattr(self, "_camera_updaters", []),
+            update_function,
+        ]
         return self
 
     def increment_theta(self, delta: float) -> Self:
-        self.set_euler_angles(self.get_theta() + delta, self.get_phi(), self.get_gamma())
+        self.set_euler_angles(
+            self.get_theta() + delta, self.get_phi(), self.get_gamma()
+        )
         return self
 
     def increment_phi(self, delta: float) -> Self:
-        self.set_euler_angles(self.get_theta(), self.get_phi() + delta, self.get_gamma())
+        self.set_euler_angles(
+            self.get_theta(), self.get_phi() + delta, self.get_gamma()
+        )
         return self
 
     def increment_gamma(self, delta: float) -> Self:
-        self.set_euler_angles(self.get_theta(), self.get_phi(), self.get_gamma() + delta)
+        self.set_euler_angles(
+            self.get_theta(), self.get_phi(), self.get_gamma() + delta
+        )
         return self
 
 
@@ -667,14 +710,14 @@ class ThreeDCamera(Camera):
         return sorted(mobjects, key=z_key)
 
     #: Number of depth slices used when depth pieces are present; see
-    #: :meth:`get_draw_items`.
+    #: :meth:`get_draw_order`.
     depth_slices = 64
 
-    def get_draw_items(
+    def get_draw_order(
         self,
         mobjects: list[Mobject],
         roots: dict[int, int] | None = None,
-    ) -> list[tuple[Mobject, np.ndarray | None]]:
+    ) -> DrawOrder:
         """Order depth pieces and 3D mobjects back to front.
 
         Without depth pieces (see :meth:`.Mobject.get_depth_pieces`) this is
@@ -684,9 +727,8 @@ class ThreeDCamera(Camera):
         to near; inside a slice, top-level scene mobjects (``roots`` maps
         ``id(mobject)`` to its top-level index) draw in scene order, and the
         parts of one top-level mobject far to near.  Consecutive pieces of one
-        mobject then form a single draw, so a field of thousands of arrows
-        costs a few dozen draws instead of one per arrow.  Mobjects that are
-        not 3D are drawn last, in display order.
+        mobject form one run.  Mobjects that are not 3D are drawn last, in
+        display order.
         """
         pieces: dict[int, np.ndarray] = {}
         for index, mobject in enumerate(mobjects):
@@ -695,7 +737,7 @@ class ThreeDCamera(Camera):
                 if centers is not None and len(centers):
                     pieces[index] = np.asarray(centers, dtype=float)
         if not pieces:
-            return [(mobject, None) for mobject in mobjects]
+            return DrawOrder.whole(mobjects)
 
         depth_axis = self.get_rotation_matrix()[2]
         roots = roots or {}
@@ -746,13 +788,16 @@ class ThreeDCamera(Camera):
         order = np.lexsort((sort_depth, group, slices))
         owner, part = owner[order], part[order]
 
-        items: list[tuple[Mobject, np.ndarray | None]] = []
         starts = np.flatnonzero(np.diff(owner, prepend=-1) != 0)
         ends = np.append(starts[1:], len(owner))
-        for start, end in zip(starts, ends):
-            index = int(owner[start])
-            items.append((mobjects[index], part[start:end] if index in pieces else None))
-        return items
+        pieced = part[starts] >= 0
+        return DrawOrder(
+            mobjects,
+            owner[starts].astype(np.int64),
+            np.where(pieced, starts, 0).astype(np.int64),
+            np.where(pieced, ends, 0).astype(np.int64),
+            part.astype(np.int64),
+        )
 
     def get_phi(self) -> float:
         """Returns the Polar angle (the angle off Z_AXIS) phi.
@@ -1060,16 +1105,16 @@ class _CameraAnimate:
     def __init__(self, camera: Camera) -> None:
         self.camera = camera
 
-    def _angle_animation(self, **target: float) -> "_CameraEulerAnimation":
+    def _angle_animation(self, **target: float) -> _CameraEulerAnimation:
         return _CameraEulerAnimation(self.camera, **target)
 
-    def increment_phi(self, delta: float, **kwargs: Any) -> "_CameraEulerAnimation":
+    def increment_phi(self, delta: float, **kwargs: Any) -> _CameraEulerAnimation:
         return self._angle_animation(phi_delta=delta, **kwargs)
 
-    def increment_theta(self, delta: float, **kwargs: Any) -> "_CameraEulerAnimation":
+    def increment_theta(self, delta: float, **kwargs: Any) -> _CameraEulerAnimation:
         return self._angle_animation(theta_delta=delta, **kwargs)
 
-    def increment_gamma(self, delta: float, **kwargs: Any) -> "_CameraEulerAnimation":
+    def increment_gamma(self, delta: float, **kwargs: Any) -> _CameraEulerAnimation:
         return self._angle_animation(gamma_delta=delta, **kwargs)
 
 
@@ -1098,7 +1143,11 @@ class _CameraEulerAnimation(Animation):
         self._start = (camera.get_theta(), camera.get_phi(), camera.get_gamma())
 
     def begin(self) -> None:
-        self._start = (self.camera.get_theta(), self.camera.get_phi(), self.camera.get_gamma())
+        self._start = (
+            self.camera.get_theta(),
+            self.camera.get_phi(),
+            self.camera.get_gamma(),
+        )
         self.interpolate(0.0)
 
     def interpolate(self, alpha: float) -> None:
@@ -1123,4 +1172,3 @@ class _CameraEulerAnimation(Animation):
 
     def is_remover(self) -> bool:
         return False
-

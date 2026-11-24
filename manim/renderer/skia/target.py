@@ -261,10 +261,12 @@ class SkiaRenderTarget:
             occlude,
         )
 
-    def draw_point_pixels(self, points, half_size: float) -> None:
-        """Draw point-cloud samples as squares of device pixels."""
+    def draw_point_pixels(self, centers: np.ndarray, colors: np.ndarray, half_size: float) -> None:
+        """Draw point-cloud samples as squares of device pixels: ``(n, 2)``
+        float32 centers and ``(n, 4)`` uint8 RGBA colors.
+        """
         self._ensure_open()
-        self._native.draw_point_pixels(points, float(half_size))
+        self._native.draw_point_pixels(centers, colors, float(half_size))
 
     def draw_sksl_quad(self, source: str, uniforms: dict[str, object], quad) -> None:
         """Compile and draw a user SkSL effect over a device-space quad."""

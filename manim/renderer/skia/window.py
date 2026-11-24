@@ -124,7 +124,7 @@ class VulkanWindow:
 
     destroy = close
 
-    def __enter__(self) -> "VulkanWindow":
+    def __enter__(self) -> VulkanWindow:
         return self
 
     def __exit__(self, *exc: object) -> None:

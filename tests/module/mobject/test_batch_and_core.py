@@ -62,7 +62,7 @@ def test_cubic_subpaths_match_vmobject_rules():
     vm = VMobject()
     vm.set_points(np.concatenate([square.points, Line(LEFT, RIGHT).shift(UP * 3).points]))
     _, subpaths = manim_core.cubic_subpaths(vm.points, 4, 2, vm.tolerance_for_point_equality)
-    assert subpaths == [(0, 16, True), (16, 20, False)]
+    assert subpaths.tolist() == [[0, 16, 1], [16, 20, 0]]
 
 
 def test_mobject_transforms_and_boxes_are_unchanged():

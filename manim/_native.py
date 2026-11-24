@@ -15,7 +15,7 @@ import manim_vk
 __all__: list[str] = []
 
 # Bump with the API_VERSION constant in native/<name>/src/lib.rs.
-_EXPECTED = {manim_core: 1, manim_vk: 1}
+_EXPECTED = {manim_core: 2, manim_vk: 2}
 
 for _module, _expected in _EXPECTED.items():
     _found = getattr(_module, "API_VERSION", None)
