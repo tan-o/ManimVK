@@ -15,7 +15,9 @@ stand-ins are made (a latitude and longitude grid by day, dots by night).
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib.util
+import io
 import tempfile
 from pathlib import Path
 
@@ -53,12 +55,23 @@ def _stand_in_earth(folder: Path) -> None:
     Image.fromarray(night).save(folder / "NightEarthTextureMap.png")
 
 
+def _jpeg(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", type=Path, default=Path("scenes/hairy"))
     parser.add_argument("--size", default="854x480")
     parser.add_argument("--frame-rate", type=int, default=15)
     parser.add_argument("--assets", type=Path, default=None)
+    parser.add_argument(
+        "--print-jpeg",
+        action="store_true",
+        help="also print each frame as a base64 JPEG line, for reading it from a CI log",
+    )
     parser.add_argument("scenes", nargs="*", default=list(FRAMES))
     args = parser.parse_args()
     width, height = (int(value) for value in args.size.split("x"))
@@ -91,6 +104,8 @@ def main() -> None:
                     path = args.out / f"{name}_{frame.requested_time:05.1f}s.png"
                     frame.image.save(path)
                     print(path, flush=True)
+                    if args.print_jpeg:
+                        print(f"JPEG {path.name} {_jpeg(frame.image)}", flush=True)
 
                 Manager(scene).evaluate(frame_times=FRAMES[name], on_frame=save)
 

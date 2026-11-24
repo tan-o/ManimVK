@@ -94,6 +94,10 @@ jobs:
           python -c "import manim_vk, manim_core; print('native modules import')"
 
       - name: Run the tests
+        env:
+          # Graphical unit comparisons with ManimCE's Cairo control frames,
+          # per frame, with images of those that differ in places.
+          MANIM_FRAME_REPORT: scenes/frame_report
         run: python -m pytest tests -q -o addopts="" -p no:cacheprovider
 
       - name: Render a movie
@@ -125,7 +129,31 @@ jobs:
 
       - name: Draw hairy ball frames
         if: ${{ !cancelled() }}
-        run: python tools/scenes/hairy_frames.py --out scenes/hairy --size 854x480
+        run: python tools/scenes/hairy_frames.py --out scenes/hairy --size 854x480 --print-jpeg
+
+      - name: Summarise the Cairo comparisons
+        if: ${{ !cancelled() }}
+        # The largest per-block differences from ManimCE's control frames,
+        # and the images of those over 24 levels as base64 JPEG lines.
+        run: |
+          python - <<'EOF'
+          import base64, io, json, pathlib
+          from PIL import Image
+          folder = pathlib.Path("scenes/frame_report")
+          rows = [json.loads(line) for line in (folder / "report.jsonl").read_text().splitlines()]
+          worst = {}
+          for row in rows:
+              if row["max_block"] > worst.get(row["name"], {"max_block": -1})["max_block"]:
+                  worst[row["name"]] = row
+          ranked = sorted(worst.values(), key=lambda row: -row["max_block"])
+          print(len(rows), "frames compared,", len(worst), "tests")
+          for row in ranked[:60]:
+              print(json.dumps(row))
+          for path in sorted(folder.glob("*.png"))[:40]:
+              buffer = io.BytesIO()
+              Image.open(path).convert("RGB").save(buffer, format="JPEG", quality=80)
+              print("JPEG", path.name, base64.b64encode(buffer.getvalue()).decode())
+          EOF
 
       - name: Upload the report
         if: always()
@@ -136,5 +164,6 @@ jobs:
             scenes/report.md
             scenes/frames/*/final.png
             scenes/hairy/*.png
+            scenes/frame_report/*
             media/videos
           if-no-files-found: warn

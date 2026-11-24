@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
 from collections.abc import Generator
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from manim.typing import PixelArray
 
@@ -35,6 +38,41 @@ def frame_difference(frame: PixelArray, control: PixelArray) -> tuple[float, flo
     coarse = float(np.abs(_coarse(frame)[..., :3] - _coarse(control)[..., :3]).mean())
     alpha = float(np.abs(frame[..., 3] - control[..., 3]).mean())
     return coarse, alpha
+
+
+def _report(name: str, frame_number: int, frame: PixelArray, control: PixelArray) -> None:
+    """With ``MANIM_FRAME_REPORT`` set to a folder, append this comparison to
+    its ``report.jsonl`` (the means above and the largest difference of one
+    8x8 block, which a thin missing line shows and the means hide) and save
+    frame, control and difference side by side when that block differs by
+    more than 24 levels.
+    """
+    folder = os.environ.get("MANIM_FRAME_REPORT")
+    if not folder:
+        return
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    frame = np.asarray(frame, dtype=np.float64)
+    control = np.asarray(control, dtype=np.float64)
+    blocks = np.abs(_coarse(frame)[..., :3] - _coarse(control)[..., :3]).max(axis=-1)
+    coarse, alpha = frame_difference(frame, control)
+    record = {
+        "name": name,
+        "frame": frame_number,
+        "coarse": round(coarse, 3),
+        "alpha": round(alpha, 3),
+        "max_block": round(float(blocks.max()), 1),
+        "blocks_over_24": int((blocks > 24).sum()),
+    }
+    with open(folder / "report.jsonl", "a") as report:
+        report.write(json.dumps(record) + "\n")
+    if record["max_block"] > 24:
+        difference = np.abs(frame - control)
+        difference[..., 3] = 255
+        image = np.concatenate([frame, control, difference], axis=1)
+        Image.fromarray(np.clip(image, 0, 255).astype(np.uint8)).save(
+            folder / f"{Path(name).stem}_{frame_number}.png"
+        )
 
 
 logger = logging.getLogger("manim")
@@ -72,6 +110,7 @@ class _FramesTester:
         assert frame.shape == control.shape, (
             f"Frame no {frame_number} has shape {frame.shape}, the control frame {control.shape}."
         )
+        _report(self._file_path.name, frame_number, frame, control)
         coarse, alpha = frame_difference(frame, control)
         if coarse <= COARSE_RGB_TOLERANCE and alpha <= ALPHA_TOLERANCE:
             self._frames_compared += 1
