@@ -135,3 +135,7 @@ dist/
 
 # Ignore the built dependencies
 third_party/*
+
+# Output of tools/scenes and of local renders
+/scenes*/
+/renders/

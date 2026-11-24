@@ -49,6 +49,11 @@ def directive_blocks(text: str):
             body.append(line)
             i += 1
         code = textwrap.dedent("\n".join(body)).strip("\n")
+        if code.startswith(">>> "):
+            # A doctest: the directive runs its >>> and ... lines.
+            code = "\n".join(
+                line[4:] for line in code.splitlines() if line.startswith((">>> ", "... "))
+            )
         if code:
             yield name, options, code
 

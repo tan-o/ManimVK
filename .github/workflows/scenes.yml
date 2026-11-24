@@ -71,6 +71,7 @@ jobs:
             standalone preview doublestroke setspace rsfs relsize
             ragged2e fundus-calligra microtype wasysym physics dvisvgm jknapltx
             wasy cm-super babel-english gnu-freefont mathastext cbfonts-fd xetex
+            esvect frcursive ctex fandol xecjk zhnumber
 
       - name: Select lavapipe
         run: |

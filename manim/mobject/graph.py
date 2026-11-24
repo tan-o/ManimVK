@@ -53,6 +53,8 @@ class LayoutFunction(Protocol):
 
         class CustomLayoutExample(Scene):
             def construct(self):
+                from typing import Any
+
                 import numpy as np
                 import networkx as nx
 

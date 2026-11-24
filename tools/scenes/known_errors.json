@@ -1,10 +1,3 @@
 {
-  "docs_source_guides_using_text__LaTeXMathFonts": "Needs LaTeX font packages the CI TeX Live does not install.",
-  "docs_source_guides_using_text__LaTeXTemplateLibrary": "Needs xelatex template packages the CI TeX Live does not install.",
-  "example_scenes__advanced_tex_fonts__TexFontTemplateManual": "Needs a LaTeX font package the CI TeX Live does not install.",
-  "example_scenes__customtex__InCodeTexTemplate": "Needs LaTeX packages the CI TeX Live does not install.",
-  "example_scenes__customtex__TexTemplateFromCLI": "Needs LaTeX packages the CI TeX Live does not install.",
-  "manim_mobject_geometry_tips__CustomTipExample": "The docstring example is a fragment, not a complete module.",
-  "manim_mobject_graph__CustomLayoutExample": "The docstring example uses Any without importing it.",
-  "manim_scene_scene__SoundExample": "Plays click.wav, which the docs do not ship."
+  "example_scenes__customtex__TexTemplateFromCLI": "Needs --tex_template custom_template.tex on the command line, as its docstring says."
 }

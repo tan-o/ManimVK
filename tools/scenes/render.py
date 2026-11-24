@@ -95,6 +95,9 @@ def run_worker(entry: dict, scenes: Path, out: Path, width: int, height: int) ->
             "verbosity": "WARNING",
             "media_dir": str(target / "media"),
         }
+        if not entry["source"].startswith("example_scenes/"):
+            # As the documentation renders them (see manim_directive).
+            settings["assets_dir"] = str(ROOT / "docs" / "source" / "_static")
         # 1. Frames as evaluation draws them.
         with tempconfig({**settings, "format": "none"}):
             frames = []
