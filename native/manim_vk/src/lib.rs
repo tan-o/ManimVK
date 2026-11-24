@@ -284,7 +284,11 @@ fn make_gpu_shared(inner: Arc<DeviceInner>) -> PyResult<Rc<GpuShared>> {
         )
         .build()
     });
-    let context = gpu::direct_contexts::make_vulkan(&backend, None)
+    let mut options = gpu::ContextOptions::new();
+    // Samples of dynamic MSAA and of the path atlas: the device's count up
+    // to 8 (Skia's default is 4, sized for phones).
+    options.internal_multisample_count = 8;
+    let context = gpu::direct_contexts::make_vulkan(&backend, &options)
         .ok_or_else(|| PyRuntimeError::new_err("Skia make_vulkan returned None"))?;
     Ok(Rc::new(GpuShared {
         _backend: backend,
@@ -369,13 +373,23 @@ impl SkiaTarget {
             AlphaType::Premul,
             None,
         );
+        // Dynamic MSAA, as Chrome draws on Vulkan: simple shapes keep
+        // analytic coverage, and a complex path (a depth slice of thousands
+        // of strokes, a glyph run) is tessellated into a transient
+        // multisample attachment.  Without it, Ganesh rasterises each such
+        // path on the CPU into a mask texture the size of its bounds, and
+        // keeps the mask cached: a full-screen texture per slice per frame.
+        let props = skia_safe::SurfaceProps::new(
+            skia_safe::SurfacePropsFlags::DYNAMIC_MSAA,
+            skia_safe::PixelGeometry::Unknown,
+        );
         let surface = gpu::surfaces::render_target(
             &mut context,
             gpu::Budgeted::Yes,
             &info,
             None,
             gpu::SurfaceOrigin::TopLeft,
-            None,
+            Some(&props),
             false,
             None,
         )

@@ -20,6 +20,13 @@ shapes and ``MultiCamera`` sub-views all draw and composite on the GPU.  A frame
 is copied to host memory only when a video writer, still image, or preview
 needs pixels.
 
+Frames use Skia's dynamic MSAA, as Chrome does on Vulkan: simple shapes keep
+analytic anti-aliasing, and complex paths (a depth slice of thousands of
+strokes, a run of glyphs) are tessellated on the GPU into a transient
+multisample attachment of up to 8 samples, instead of being rasterised on the
+CPU into mask textures.  ``SkiaRenderer.memory_usage()`` reports the GPU
+memory in use, and ``tools/bench/frame_cost.py`` prints it per scene.
+
 Selecting a GPU
 ---------------
 
