@@ -116,9 +116,6 @@ uniform float depthTest;
 uniform float mode;
 uniform float4 fill;
 {LIGHT}
-float4 unpremul(float4 c) {{
-    return c.a > 0 ? float4(c.rgb / c.a, c.a) : float4(0);
-}}
 float2 main(const Varyings v, out float4 color) {{
     float3 point = v.pointDepth.xyz;
     float depth = v.pointDepth.w;

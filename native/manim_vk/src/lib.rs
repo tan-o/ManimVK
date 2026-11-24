@@ -622,21 +622,16 @@ impl SkiaTarget {
         }
         let has_depth = !depth_vertices.is_empty();
         let depth = if has_depth {
-            // Skia's recorded work, which may read the previous depth image,
-            // is submitted before the pass that overwrites it.
-            self.context.flush_and_submit().map_err(|error| {
-                PyRuntimeError::new_err(format!("Skia flush failed: {error:?}"))
-            })?;
             if self.depth_pass.is_none() {
                 self.depth_pass = Some(depth::DepthPass::new(
                     self._inner.clone(),
+                    &mut self.context,
                     self.width,
                     self.height,
                 )?);
             }
             let pass = self.depth_pass.as_mut().expect("created above");
-            pass.render(&depth_vertices)?;
-            pass.image(&mut self.context)?
+            pass.render(&mut self.context, &depth_vertices)?
                 .to_raw_shader(
                     Some((TileMode::Clamp, TileMode::Clamp)),
                     SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),

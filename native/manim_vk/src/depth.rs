@@ -5,7 +5,10 @@
 //! the depth comes from a small render pass of our own on the same device and
 //! queue: it draws the opaque triangles with a depth test, the way ManimGL
 //! draws surfaces, and writes the nearest depth of every pixel into a colour
-//! image that Skia then samples (see `meshes`).  Depth is normalised to
+//! texture that Skia then samples (see `meshes`).  The texture belongs to a
+//! Skia surface: Skia allocates it, hands out its `VkImage` for writing
+//! (`SkSurfaces::GetBackendTexture`) and is told its layout around our pass
+//! (`GrDirectContext::setBackendTextureState`), Skia's interop interface.  Depth is normalised to
 //! `[0, 1]`, nearer is larger, and `0` means "no opaque mesh"; it is stored
 //! as 24 bits over the red, green and blue channels, the precision of a
 //! usual depth buffer, in the one colour format every Vulkan device and Skia
@@ -22,6 +25,7 @@ use skia_safe::gpu;
 
 use crate::DeviceInner;
 
+/// The format of Skia's RGBA8888 textures on Vulkan.
 const COLOR_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// Floats per vertex: device x and y (pixels), then normalised depth.
@@ -88,12 +92,16 @@ pub struct DepthPass {
     inner: Arc<DeviceInner>,
     width: u32,
     height: u32,
-    color: Allocated<vk::Image>,
+    /// The Skia surface whose texture receives the depth.
+    surface: skia_safe::Surface,
+    /// The texture's image, view and framebuffer: the image changes only if
+    /// Skia replaces the surface's texture.
+    color_image: vk::Image,
     color_view: vk::ImageView,
+    framebuffer: vk::Framebuffer,
     depth: Allocated<vk::Image>,
     depth_view: vk::ImageView,
     render_pass: vk::RenderPass,
-    framebuffer: vk::Framebuffer,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     pool: vk::CommandPool,
@@ -103,44 +111,55 @@ pub struct DepthPass {
 }
 
 impl DepthPass {
-    pub fn new(inner: Arc<DeviceInner>, width: u32, height: u32) -> PyResult<Self> {
-        for (format, feature) in [
-            (
-                COLOR_FORMAT,
-                vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::SAMPLED_IMAGE,
+    pub fn new(
+        inner: Arc<DeviceInner>,
+        context: &mut gpu::DirectContext,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Self> {
+        let surface = gpu::surfaces::render_target(
+            context,
+            gpu::Budgeted::Yes,
+            &skia_safe::ImageInfo::new(
+                (width as i32, height as i32),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Premul,
+                None,
             ),
-            (
-                DEPTH_FORMAT,
-                vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
-            ),
-        ] {
-            let properties = unsafe {
-                inner
-                    .instance
-                    .get_physical_device_format_properties(inner.physical_device, format)
-            };
-            if !properties.optimal_tiling_features.contains(feature) {
-                return Err(PyRuntimeError::new_err(format!(
-                    "the Vulkan device cannot use {format:?} for 3D depth"
-                )));
-            }
+            None,
+            gpu::SurfaceOrigin::TopLeft,
+            None,
+            false,
+            None,
+        )
+        .ok_or_else(|| PyRuntimeError::new_err("depth pass: Skia render_target returned None"))?;
+        let properties = unsafe {
+            inner
+                .instance
+                .get_physical_device_format_properties(inner.physical_device, DEPTH_FORMAT)
+        };
+        if !properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return Err(PyRuntimeError::new_err(format!(
+                "the Vulkan device has no {DEPTH_FORMAT:?} depth buffer"
+            )));
         }
         let mut pass = Self {
             inner,
             width,
             height,
-            color: Allocated {
-                handle: vk::Image::null(),
-                memory: vk::DeviceMemory::null(),
-            },
+            surface,
+            color_image: vk::Image::null(),
             color_view: vk::ImageView::null(),
+            framebuffer: vk::Framebuffer::null(),
             depth: Allocated {
                 handle: vk::Image::null(),
                 memory: vk::DeviceMemory::null(),
             },
             depth_view: vk::ImageView::null(),
             render_pass: vk::RenderPass::null(),
-            framebuffer: vk::Framebuffer::null(),
             layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             pool: vk::CommandPool::null(),
@@ -250,13 +269,6 @@ impl DepthPass {
     }
 
     fn create(&mut self) -> PyResult<()> {
-        let (color, color_view) = self.allocate_image(
-            COLOR_FORMAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-            vk::ImageAspectFlags::COLOR,
-        )?;
-        self.color = color;
-        self.color_view = color_view;
         let (depth, depth_view) = self.allocate_image(
             DEPTH_FORMAT,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -274,8 +286,10 @@ impl DepthPass {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                // Skia moves the texture to this layout before the pass and
+                // on to sampling after it.
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
             vk::AttachmentDescription::default()
                 .format(DEPTH_FORMAT)
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -298,18 +312,23 @@ impl DepthPass {
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_reference)
             .depth_stencil_attachment(&depth_reference)];
-        // Skia's reads of the previous frame's depth come before our writes,
-        // and our writes before Skia's reads of this frame; both happen later
-        // or earlier in submission order on the same queue.
+        // Skia's layout change before the pass (and its reads of the last
+        // frame) come before our writes, our writes before its layout change
+        // after the pass; both are earlier or later in submission order on
+        // the same queue.
         let dependencies = [
             vk::SubpassDependency::default()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
                 .src_stage_mask(
-                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::FRAGMENT_SHADER
                         | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
                 )
-                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .src_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
                 .dst_stage_mask(
                     vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
                         | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
@@ -323,8 +342,13 @@ impl DepthPass {
                 .dst_subpass(vk::SUBPASS_EXTERNAL)
                 .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ),
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::SHADER_READ,
+                ),
         ];
         let render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
@@ -332,16 +356,6 @@ impl DepthPass {
             .dependencies(&dependencies);
         self.render_pass = unsafe { device.create_render_pass(&render_pass_info, None) }
             .map_err(|result| vk_error("vkCreateRenderPass", result))?;
-
-        let views = [self.color_view, self.depth_view];
-        let framebuffer_info = vk::FramebufferCreateInfo::default()
-            .render_pass(self.render_pass)
-            .attachments(&views)
-            .width(self.width)
-            .height(self.height)
-            .layers(1);
-        self.framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
-            .map_err(|result| vk_error("vkCreateFramebuffer", result))?;
 
         let push_constants = [vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::VERTEX,
@@ -369,6 +383,46 @@ impl DepthPass {
         self.fence = unsafe { device.create_fence(&fence_info, None) }
             .map_err(|result| vk_error("vkCreateFence", result))?;
         Ok(())
+    }
+
+    /// A framebuffer on Skia's texture `image`, made again if Skia replaced
+    /// the texture.
+    fn target(&mut self, image: vk::Image) -> PyResult<vk::Framebuffer> {
+        if image == self.color_image {
+            return Ok(self.framebuffer);
+        }
+        let device = self.inner.device.clone();
+        unsafe {
+            device.destroy_framebuffer(self.framebuffer, None);
+            device.destroy_image_view(self.color_view, None);
+        }
+        self.framebuffer = vk::Framebuffer::null();
+        self.color_view = vk::ImageView::null();
+        self.color_image = vk::Image::null();
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(COLOR_FORMAT)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        self.color_view = unsafe { device.create_image_view(&view_info, None) }
+            .map_err(|result| vk_error("vkCreateImageView", result))?;
+        let views = [self.color_view, self.depth_view];
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(self.render_pass)
+            .attachments(&views)
+            .width(self.width)
+            .height(self.height)
+            .layers(1);
+        self.framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
+            .map_err(|result| vk_error("vkCreateFramebuffer", result))?;
+        self.color_image = image;
+        Ok(self.framebuffer)
     }
 
     fn create_pipeline(&self, device: &ash::Device) -> PyResult<vk::Pipeline> {
@@ -540,9 +594,54 @@ impl DepthPass {
     }
 
     /// Draw `vertices` (triangle list, [`VERTEX_FLOATS`] floats each) with a
-    /// depth test and submit the pass.  Work Skia recorded before must be
-    /// submitted first; work it records after may read the result.
-    pub fn render(&mut self, vertices: &[f32]) -> PyResult<()> {
+    /// depth test into the depth texture and return it, ready for Skia to
+    /// sample in the work it records next.
+    pub fn render(
+        &mut self,
+        context: &mut gpu::DirectContext,
+        vertices: &[f32],
+    ) -> PyResult<skia_safe::Image> {
+        let flush = |context: &mut gpu::DirectContext| {
+            context
+                .flush_and_submit()
+                .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))
+        };
+        // The texture is overwritten whole; Skia need not keep its contents.
+        let texture = gpu::surfaces::get_backend_texture(
+            &mut self.surface,
+            skia_safe::surface::BackendHandleAccess::DiscardWrite,
+        )
+        .ok_or_else(|| PyRuntimeError::new_err("depth pass: no backend texture"))?;
+        let info = gpu::ganesh::vk::backend_textures::get_vk_image_info(&texture)
+            .ok_or_else(|| PyRuntimeError::new_err("depth pass: not a Vulkan texture"))?;
+        let framebuffer = self.target(vk::Image::from_raw(*info.image() as u64))?;
+        let family = self.inner.queue_family;
+        let layout = |layout| gpu::vk::mutable_texture_states::new_vulkan(layout, family);
+        // Skia moves the texture to a colour attachment (and submits it,
+        // with any reads of the last frame's depth) before our pass ...
+        if !context.set_backend_texture_state(
+            &texture,
+            &layout(gpu::vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        ) {
+            return Err(PyRuntimeError::new_err(
+                "depth pass: Skia refused the layout change",
+            ));
+        }
+        flush(context)?;
+        self.submit(framebuffer, vertices)?;
+        // ... and on to sampling after it, in the work it records next.
+        if !context.set_backend_texture_state(
+            &texture,
+            &layout(gpu::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        ) {
+            return Err(PyRuntimeError::new_err(
+                "depth pass: Skia refused the layout change",
+            ));
+        }
+        Ok(self.surface.image_snapshot())
+    }
+
+    fn submit(&mut self, framebuffer: vk::Framebuffer, vertices: &[f32]) -> PyResult<()> {
         let device = self.inner.device.clone();
         // The previous pass must be done before its commands and vertices
         // are reused.
@@ -595,7 +694,7 @@ impl DepthPass {
             ];
             let pass = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass)
-                .framebuffer(self.framebuffer)
+                .framebuffer(framebuffer)
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: vk::Extent2D {
@@ -639,42 +738,6 @@ impl DepthPass {
         }
         Ok(())
     }
-
-    /// The depth image, as Skia sees it after [`Self::render`].
-    pub fn image(&self, context: &mut gpu::DirectContext) -> PyResult<skia_safe::Image> {
-        let mut info = unsafe {
-            gpu::vk::ImageInfo::new(
-                self.color.handle.as_raw() as _,
-                gpu::vk::Alloc::default(),
-                gpu::vk::ImageTiling::OPTIMAL,
-                gpu::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                gpu::vk::Format::R8G8B8A8_UNORM,
-                1,
-                self.inner.queue_family,
-                None,
-                None,
-                None,
-            )
-        };
-        info.image_usage_flags =
-            (vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED).as_raw() as _;
-        let texture = unsafe {
-            gpu::ganesh::vk::backend_textures::make_vk(
-                (self.width as i32, self.height as i32),
-                &info,
-                "manim depth",
-            )
-        };
-        gpu::ganesh::images::borrow_texture_from(
-            context,
-            &texture,
-            gpu::SurfaceOrigin::TopLeft,
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Opaque,
-            None,
-        )
-        .ok_or_else(|| PyRuntimeError::new_err("depth pass: Skia cannot sample the depth image"))
-    }
 }
 
 impl Drop for DepthPass {
@@ -697,8 +760,6 @@ impl Drop for DepthPass {
             device.destroy_image(self.depth.handle, None);
             device.free_memory(self.depth.memory, None);
             device.destroy_image_view(self.color_view, None);
-            device.destroy_image(self.color.handle, None);
-            device.free_memory(self.color.memory, None);
         }
     }
 }
