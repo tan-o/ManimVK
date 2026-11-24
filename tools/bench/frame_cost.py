@@ -4,9 +4,11 @@
   translucent sphere in a ThreeDScene camera (like HairyEarth's dense field).
 * ``many``: 3000 separate VMobjects in a 2D scene.
 
-Each frame is drawn and read back, so the time includes the GPU.  With
-``--python-only`` the native target is replaced by one that does nothing,
-which leaves the Python side alone::
+Each frame is drawn and read back.  The time is split into ``cpu`` (Python,
+Rust and Skia recording its GPU commands: ``render_mobjects``) and ``gpu``
+(waiting for the GPU to finish and reading the frame back: ``get_frame``).
+With ``--python-only`` the native target is replaced by one that does
+nothing, which leaves the Python side alone::
 
     python tools/bench/frame_cost.py
     python tools/bench/frame_cost.py --python-only --frames 20
@@ -120,19 +122,23 @@ def main() -> None:
             try:
                 renderer.render_mobjects(mobjects)
                 renderer.get_frame()
-                times = []
+                cpu, gpu = [], []
                 for frame in range(args.frames):
                     step(frame)
                     started = time.perf_counter()
                     renderer.render_mobjects(mobjects)
+                    recorded = time.perf_counter()
                     renderer.get_frame()
-                    times.append(time.perf_counter() - started)
+                    cpu.append(recorded - started)
+                    gpu.append(time.perf_counter() - recorded)
             finally:
                 renderer.close()
-            times_ms = 1000 * np.array(times)
+            cpu_ms, gpu_ms = 1000 * np.array(cpu), 1000 * np.array(gpu)
+            total = cpu_ms + gpu_ms
             print(
-                f"{name:6s} median {np.median(times_ms):7.1f} ms/frame, "
-                f"min {times_ms.min():7.1f}, max {times_ms.max():7.1f} "
+                f"{name:6s} median {np.median(total):7.1f} ms/frame "
+                f"(cpu {np.median(cpu_ms):6.1f}, gpu {np.median(gpu_ms):6.1f}), "
+                f"min {total.min():7.1f}, max {total.max():7.1f} "
                 f"({args.frames} frames at {width}x{height})"
             )
 

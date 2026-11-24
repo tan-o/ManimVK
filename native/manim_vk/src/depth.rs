@@ -606,6 +606,18 @@ impl DepthPass {
                 .flush_and_submit()
                 .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))
         };
+        // Skia's recorded work, which may sample the last depth snapshot, is
+        // submitted first: then nothing but the surface holds the snapshot
+        // and Skia hands out the same texture again instead of copying it.
+        flush(context)?;
+        // Our last pass must be done before its framebuffer, commands and
+        // vertices are touched.
+        unsafe {
+            self.inner
+                .device
+                .wait_for_fences(&[self.fence], true, u64::MAX)
+        }
+        .map_err(|result| vk_error("vkWaitForFences", result))?;
         // The texture is overwritten whole; Skia need not keep its contents.
         let texture = gpu::surfaces::get_backend_texture(
             &mut self.surface,
@@ -642,11 +654,8 @@ impl DepthPass {
     }
 
     fn submit(&mut self, framebuffer: vk::Framebuffer, vertices: &[f32]) -> PyResult<()> {
+        // `render` waited for the previous pass.
         let device = self.inner.device.clone();
-        // The previous pass must be done before its commands and vertices
-        // are reused.
-        unsafe { device.wait_for_fences(&[self.fence], true, u64::MAX) }
-            .map_err(|result| vk_error("vkWaitForFences", result))?;
         let bytes = std::mem::size_of_val(vertices);
         let count = (vertices.len() / VERTEX_FLOATS) as u32;
         let buffer = if count > 0 {
