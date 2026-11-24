@@ -40,15 +40,22 @@ In a :class:`.ThreeDScene`, mobjects with ``shade_in_3d`` and mobjects marked
 with :meth:`.Mobject.apply_depth_test` are drawn back to front.  A depth-tested
 :class:`.VMobject` is ordered per subpath, so one path holding thousands of
 short strokes, such as the hairs of a vector field on a sphere, is partly
-hidden behind the sphere and partly in front of it, while still drawing in a
-few dozen GPU calls.
+hidden behind the sphere and partly in front of it.
+
+The camera sorts the pieces into :attr:`.ThreeDCamera.depth_slices` slices of
+the frame's depth range (far to near; inside a slice by top-level mobject,
+then by depth) and returns the order as arrays.  The renderer sends a frame's
+VMobjects and mesh surfaces, each once, and the runs that draw them in that
+order to the native module in one call, so a field of 50 000 arrows costs one
+Python-to-native call per frame, not one per arrow.
 
 :class:`.MeshSurface` draws a :class:`.Surface` as one smoothly lit triangle
 mesh and :class:`.TexturedSurface` stretches an image over it, optionally with
 a second image on the side facing away from the light.  Their triangles take
 part in the same depth ordering; a translucent mesh surface hides depth-tested
-mobjects behind it, as a depth buffer would.  These are drawn by the Vulkan
-renderer only.
+mobjects behind it, as a depth buffer would.  Unlike ManimGL, this does not
+depend on the order mobjects were added: ManimGL hides only what is drawn
+after the surface.
 
 Custom shaders
 --------------
@@ -82,6 +89,9 @@ Known limitations
   writes by index or with in-place operators upload the new pixels.
   ``np.copyto`` and ``out=`` arguments are not noticed; assign
   ``pixel_array`` after using them.
-- Prebuilt native wheels currently target Windows x64.  Building on Linux
-  requires a Vulkan loader and the Skia binary cache; macOS additionally needs
-  MoltenVK.  See ``native/manim_vk/README.md`` for build commands.
+- The native modules ``manim_core`` and ``manim_vk`` are built from
+  ``native/``; no prebuilt wheels are published.  Each reports an interface
+  version, and ``import manim`` refuses a module built from older sources:
+  rebuild both after pulling changes to ``native/``.  Windows x64 is built
+  locally and Linux in CI (on lavapipe); macOS additionally needs MoltenVK.
+  See ``native/manim_vk/README.md`` for build commands.

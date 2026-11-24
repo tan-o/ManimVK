@@ -37,12 +37,23 @@ DOCS_RS=1 cargo clippy
 
 ## Platform status
 
-- Windows x64: built and exercised in this repository.
-- Linux: the source is portable; build with the system Vulkan loader and a
-  local Skia binary cache.  No prebuilt wheel is checked in.
+- Windows x64: built and exercised locally.
+- Linux: built and tested in CI (`.github/workflows/scenes.yml`) on Mesa's
+  lavapipe, the real Skia Ganesh Vulkan path in software.  No prebuilt wheel
+  is published.
 - macOS: Vulkan requires MoltenVK; no prebuilt wheel or CI job is provided yet.
 
 ## Behaviour notes
+
+- Interface version: `API_VERSION` in `src/lib.rs` must match
+  `manim/_native.py`; bump both when a binding changes.  `import manim`
+  refuses an extension built from older sources.
+- Display list (`display_list.rs`): `draw_display_list(objects, meshes, runs,
+  parts)` draws a frame's VMobjects and textured meshes in one call.  Each
+  VMobject comes once (projected points, `(start, end, closed)` subpath rows,
+  prebuilt paints), each mesh once (shaded triangles), then `(kind, object,
+  start, end)` runs in drawing order, each drawing a whole object or the depth
+  pieces `parts[start..end]`.
 
 - Keyed textures (`textures.rs`): Python names every read-only pixel array
   (image files, `ImageMobject` sources, mesh atlases) with a process-unique

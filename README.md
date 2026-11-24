@@ -94,6 +94,12 @@ custom effects use `SkSLMobject`.
   [Vulkan backend guide](docs/source/guides/vulkan_backend.rst).
 - The preview window is read-only: `interactive_embed()` is intentionally
   unsupported because keyboard and mouse events are not forwarded.
+- The native modules are built from `native/manim_core` and `native/manim_vk`
+  (see their READMEs); rebuild both after pulling changes there, as
+  `import manim` refuses modules built from older sources.
+- Every push to `master` or `rust-core-preview` runs the test suite and
+  renders every example scene on Vulkan in CI
+  (`.github/workflows/scenes.yml`).  Open work is listed in `TODO.md`.
 
 ## Command line arguments
 
