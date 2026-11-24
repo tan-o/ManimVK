@@ -146,11 +146,16 @@ fn paint((width, join, cap, stops, gradient): PaintSpec) -> Option<Paint> {
             paint.set_style(Style::Stroke);
             paint.set_stroke_width(width);
             paint.set_stroke_join(join_of(join));
+            paint.set_stroke_miter(MITER_LIMIT);
             paint.set_stroke_cap(cap_of(cap));
         }
     }
     Some(paint)
 }
+
+/// Manim Community draws with Cairo, whose miter limit is 10 (Skia's
+/// default is 4): a miter join turns into a bevel only below about 11.5°.
+pub const MITER_LIMIT: f32 = 10.0;
 
 pub fn join_of(code: i32) -> Join {
     match code {

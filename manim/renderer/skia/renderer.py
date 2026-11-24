@@ -11,7 +11,7 @@ from PIL import Image
 
 from manim import config, logger
 from manim._run.frames import frame_count
-from manim.camera import Camera, MultiCamera
+from manim.camera import Camera, MultiCamera, ThreeDCamera
 from manim.mobject.mobject import Mobject, _AnimationBuilder
 from manim.mobject.types.image_mobject import ImageMobjectFromCamera
 from manim.renderer._execution import _RendererExecutionView
@@ -102,14 +102,21 @@ class SkiaRenderer(_RendererExecutionView):
             # Create the offscreen device first so the preview can ask wgpu
             # for the same adapter instead of silently opening a second GPU.
             self._ensure_device()
-            self.window = VulkanWindow(self, _settings=_WindowSettings.from_config(config))
+            self.window = VulkanWindow(
+                self, _settings=_WindowSettings.from_config(config)
+            )
 
     @property
     def file_writer(self) -> SceneFileWriter:
         """Return the scene manager's file writer, creating it if needed."""
         return self._scene._get_manager().file_writer
 
-    def play(self, scene: Scene, *args: Animation | Mobject | _AnimationBuilder, **kwargs: Any) -> None:
+    def play(
+        self,
+        scene: Scene,
+        *args: Animation | Mobject | _AnimationBuilder,
+        **kwargs: Any,
+    ) -> None:
         """Delegate playback to the scene's manager; prefer Scene.play for new code."""
         scene._get_manager().play(*args, **kwargs)
 
@@ -133,7 +140,9 @@ class SkiaRenderer(_RendererExecutionView):
         self._ensure_open()
         self._state = RendererState.OPEN
         if self._target is None:
-            self._target = SkiaRenderTarget(self._raster_settings, self._image_files, device=self._ensure_device())
+            self._target = SkiaRenderTarget(
+                self._raster_settings, self._image_files, device=self._ensure_device()
+            )
         return self._target
 
     def _sub_target_for(
@@ -144,18 +153,35 @@ class SkiaRenderer(_RendererExecutionView):
         parent_target: SkiaRenderTarget,
     ) -> SkiaRenderTarget:
         parent_settings = parent_target.settings
-        pixel_height = max(1, int(parent_settings.pixel_height * image_mobject.height / parent_camera.frame_height))
-        pixel_width = max(1, int(parent_settings.pixel_width * image_mobject.width / parent_camera.frame_width))
+        pixel_height = max(
+            1,
+            int(
+                parent_settings.pixel_height
+                * image_mobject.height
+                / parent_camera.frame_height
+            ),
+        )
+        pixel_width = max(
+            1,
+            int(
+                parent_settings.pixel_width
+                * image_mobject.width
+                / parent_camera.frame_width
+            ),
+        )
         key = id(image_mobject)
         target = self._sub_targets.get(key)
         if target is not None and (
-            target.settings.pixel_width != pixel_width or target.settings.pixel_height != pixel_height
+            target.settings.pixel_width != pixel_width
+            or target.settings.pixel_height != pixel_height
         ):
             target.close()
             target = None
         if target is None:
             target = SkiaRenderTarget(
-                parent_settings.resized(pixel_width=pixel_width, pixel_height=pixel_height),
+                parent_settings.resized(
+                    pixel_width=pixel_width, pixel_height=pixel_height
+                ),
                 self._image_files,
                 device=self._ensure_device(),
             )
@@ -185,14 +211,18 @@ class SkiaRenderer(_RendererExecutionView):
 
         if isinstance(camera, MultiCamera):
             for image_mobject in camera.image_mobjects_from_cameras:
-                sub_target = self._sub_target_for(image_mobject, parent_camera=camera, parent_target=target)
+                sub_target = self._sub_target_for(
+                    image_mobject, parent_camera=camera, parent_target=target
+                )
                 sub_target.reset(image_mobject.camera)
                 self._render_camera(
                     camera=image_mobject.camera,
                     target=sub_target,
                     mobjects=mobject_list,
                     include_submobjects=include_submobjects,
-                    excluded_mobjects=list_update(list(excluded_mobjects or []), [image_mobject]),
+                    excluded_mobjects=list_update(
+                        list(excluded_mobjects or []), [image_mobject]
+                    ),
                     camera_stack=next_stack,
                 )
                 # The finished surface stays on the GPU; the parent samples it.
@@ -200,10 +230,14 @@ class SkiaRenderer(_RendererExecutionView):
                 views[id(image_mobject.camera)] = sub_target
                 self._drawn_views.add(id(image_mobject))
 
-        def resolve_image(image_mobject: ImageMobjectFromCamera) -> SkiaRenderTarget | None:
+        def resolve_image(
+            image_mobject: ImageMobjectFromCamera,
+        ) -> SkiaRenderTarget | None:
             return views.get(id(image_mobject)) or views.get(id(image_mobject.camera))
 
-        SkiaDrawingContext(camera=camera, target=target, image_resolver=resolve_image).draw(
+        SkiaDrawingContext(
+            camera=camera, target=target, image_resolver=resolve_image
+        ).draw(
             mobject_list,
             include_submobjects=include_submobjects,
             excluded_mobjects=excluded_mobjects,
@@ -262,7 +296,9 @@ class SkiaRenderer(_RendererExecutionView):
             excluded_mobjects=excluded_mobjects,
         )
 
-    def render_mobjects(self, mobjects: Iterable[Mobject], *, camera: Camera | None = None) -> None:
+    def render_mobjects(
+        self, mobjects: Iterable[Mobject], *, camera: Camera | None = None
+    ) -> None:
         """Draw the supplied mobjects on a cleared frame."""
         self._ensure_open()
         render_camera = self.camera if camera is None else camera
@@ -270,7 +306,12 @@ class SkiaRenderer(_RendererExecutionView):
         self._get_target().reset(render_camera)
         self._draw_frame(camera=render_camera, mobjects=mobjects)
 
-    def render(self, scene: Scene, time: float, moving_mobjects: Iterable[Mobject] | None = None) -> None:
+    def render(
+        self,
+        scene: Scene,
+        time: float,
+        moving_mobjects: Iterable[Mobject] | None = None,
+    ) -> None:
         if self._render_all_mobjects:
             moving_mobjects = None
         # Manager advances animation time and sends the pixels to the writer.
@@ -295,7 +336,9 @@ class SkiaRenderer(_RendererExecutionView):
         if self.window is not None:
             self.window.swap_buffers()
 
-    def save_static_frame_data(self, scene: Scene, static_mobjects: Iterable[Mobject]) -> None:
+    def save_static_frame_data(
+        self, scene: Scene, static_mobjects: Iterable[Mobject]
+    ) -> None:
         """Draw the play's static mobjects once and keep them on the GPU."""
         self._ensure_open()
         self.discard_static_frame()
@@ -305,11 +348,40 @@ class SkiaRenderer(_RendererExecutionView):
             isinstance(self.camera, MultiCamera)
             and bool(self.camera.image_mobjects_from_cameras)
             and bool(scene.moving_mobjects)
-        )
+        ) or not self._static_layer_keeps_draw_order(scene)
         if self._render_all_mobjects or not static_mobjects:
             return
         self.update_frame(scene, mobjects=static_mobjects)
         self._get_target().capture_static_layer()
+
+    def _static_layer_keeps_draw_order(self, scene: Scene) -> bool:
+        """Whether drawing the static mobjects first and the moving ones on top
+        gives the frame's own drawing order.
+
+        The static layer is under every moving mobject, so it may only hold
+        mobjects that draw before all of them.  In a depth-sorting camera,
+        moving 3D mobjects interleave with static ones by depth (and flat
+        mobjects draw after every 3D one), so no static layer is kept; with
+        ``use_z_index``, a static mobject may draw above a moving one.
+        """
+        moving = {id(mobject) for mobject in scene.moving_mobjects}
+        if not moving:
+            return True
+        if isinstance(self.camera, ThreeDCamera) and any(
+            mobject.depth_test or getattr(mobject, "shade_in_3d", False)
+            for mobject in scene.moving_mobjects
+        ):
+            return False
+        order = self.camera.get_mobjects_to_display(
+            list_update(scene.mobjects, scene.foreground_mobjects)
+        )
+        seen_moving = False
+        for mobject in order:
+            if id(mobject) in moving:
+                seen_moving = True
+            elif seen_moving:
+                return False
+        return True
 
     def discard_static_frame(self) -> None:
         """Forget the static background of the finished play."""
@@ -334,7 +406,9 @@ class SkiaRenderer(_RendererExecutionView):
         # final state.  Draw it when the pixels are read, not for every scene.
         self._final_scene = scene
         if output.is_still or (
-            not self.num_plays and output.fallback_to_still and not getattr(scene, "interactive_mode", False)
+            not self.num_plays
+            and output.fallback_to_still
+            and not getattr(scene, "interactive_mode", False)
         ):
             self.file_writer.save_image(self.get_frame())
 
@@ -385,7 +459,9 @@ class SkiaRenderer(_RendererExecutionView):
 
     def _new_snapshot_renderer(self) -> SkiaRenderer:
         """A renderer for snapshots that shares this renderer's Vulkan device."""
-        renderer = SkiaRenderer(camera=self.camera, _raster_settings=self._raster_settings)
+        renderer = SkiaRenderer(
+            camera=self.camera, _raster_settings=self._raster_settings
+        )
         renderer._vk_device = self._ensure_device()
         return renderer
 

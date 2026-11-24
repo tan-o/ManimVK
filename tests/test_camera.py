@@ -8,6 +8,7 @@ from PIL import Image
 
 from manim import (
     BLUE,
+    DEGREES,
     LEFT,
     ORIGIN,
     RED,
@@ -19,13 +20,16 @@ from manim import (
     ImageMobject,
     ImageMobjectFromCamera,
     LineJointType,
+    MeshSurface,
     Mobject,
     MovingCamera,
     MultiCamera,
     Rectangle,
     Scene,
+    Sphere,
     Square,
     ThreeDCamera,
+    ThreeDScene,
     VMobject,
     config,
     tempconfig,
@@ -496,3 +500,85 @@ def test_a_cairo_renderer_closes_at_the_end_of_a_with_block():
         renderer.render_mobjects([Square()])
     with pytest.raises(RuntimeError, match="closed"):
         renderer.render_mobjects([Square()])
+
+
+def _depth_tested_hairs():
+    hairs = VMobject(stroke_width=4)
+    starts = np.array([[x, 0.0, 1.2] for x in np.linspace(-1, 1, 5)])
+    points = np.concatenate(
+        [
+            np.stack([s, s + [0, 0.3, 0], s + [0, 0.6, 0], s + [0, 0.9, 0]])
+            for s in starts
+        ]
+    )
+    hairs.set_points(np.concatenate([points, points * [1, 1, -1]]))
+    return hairs.apply_depth_test()
+
+
+def test_depth_sorted_play_keeps_no_static_layer_under_moving_3d_mobjects():
+    renderer = SkiaRenderer(camera=ThreeDCamera())
+    sphere = MeshSurface(Sphere(radius=1), opacity=0.5)
+    hairs = _depth_tested_hairs()
+    scene = SimpleNamespace(
+        moving_mobjects=hairs.get_family(),
+        mobjects=[sphere, hairs],
+        foreground_mobjects=[],
+    )
+    try:
+        renderer.save_static_frame_data(scene, [sphere])
+        # The hairs behind the sphere must still be hidden by it.
+        assert renderer._render_all_mobjects is True
+    finally:
+        renderer.close()
+
+
+def test_static_layer_needs_every_static_mobject_below_the_moving_ones():
+    renderer = SkiaRenderer(camera=Camera())
+    above, below = Square().set_z_index(1), Square().set_z_index(0)
+    scene = SimpleNamespace(
+        moving_mobjects=[below], mobjects=[above, below], foreground_mobjects=[]
+    )
+    try:
+        renderer.save_static_frame_data(scene, [above])
+        assert renderer._render_all_mobjects is True
+        scene.mobjects = [below, above]
+        scene.moving_mobjects = [above]
+        renderer.save_static_frame_data(scene, [below])
+        assert renderer._render_all_mobjects is False
+    finally:
+        renderer.close()
+
+
+def test_wait_with_a_depth_tested_updater_draws_like_a_full_frame():
+    frames = []
+
+    class Hairs(ThreeDScene):
+        def construct(self):
+            self.set_camera_orientation(phi=60 * DEGREES, theta=30 * DEGREES)
+            self.add(MeshSurface(Sphere(radius=1), opacity=0.5))
+            hairs = _depth_tested_hairs()
+            hairs.add_updater(lambda mobject, dt: mobject)
+            self.add(hairs)
+            self.wait(0.1)
+            frames.append(self.renderer.get_frame().copy())
+            self.renderer.render_mobjects(self.mobjects)
+            frames.append(self.renderer.get_frame().copy())
+
+    with tempconfig({"pixel_width": 160, "pixel_height": 90, "dry_run": True}):
+        Hairs().render()
+    np.testing.assert_array_equal(frames[0], frames[1])
+
+
+def test_sharp_miter_joins_use_cairos_miter_limit():
+    # Arms 20° apart: the miter is 1 / sin(10°) = 5.8 half-widths long, under
+    # Cairo's limit of 10 (Manim Community) but over Skia's default of 4.
+    half_angle = 10 * DEGREES
+    arm = 2 * np.array([-np.cos(half_angle), np.sin(half_angle), 0])
+    corner = VMobject(stroke_width=20, joint_type=LineJointType.MITER)
+    corner.set_points_as_corners([arm, ORIGIN, arm * [1, -1, 0]])
+    with tempconfig({"pixel_width": 320, "pixel_height": 180}):
+        pixels = _render_pixels([corner])
+        # The tip of the miter, 0.4 units past the corner on the x axis.
+        x = int((0.4 / config.frame_width + 0.5) * config.pixel_width)
+        y = config.pixel_height // 2
+        assert pixels[y, x, :3].any()

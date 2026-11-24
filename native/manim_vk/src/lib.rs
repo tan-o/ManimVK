@@ -201,21 +201,6 @@ impl Device {
         self.inner.device_name.clone()
     }
 
-    fn api_version(&self) -> String {
-        let properties = unsafe {
-            self.inner
-                .instance
-                .get_physical_device_properties(self.inner.physical_device)
-        };
-        let version = properties.api_version;
-        format!(
-            "{}.{}.{}",
-            vk::api_version_major(version),
-            vk::api_version_minor(version),
-            vk::api_version_patch(version)
-        )
-    }
-
     fn create_skia_target(&self, width: u32, height: u32) -> PyResult<SkiaTarget> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err("target dimensions must be positive"));
@@ -360,6 +345,7 @@ impl SkiaTarget {
             paint: {
                 let mut paint = Paint::default();
                 paint.set_anti_alias(true);
+                paint.set_stroke_miter(display_list::MITER_LIMIT);
                 paint
             },
             matrix: M44::new_identity(),
@@ -495,16 +481,6 @@ impl SkiaTarget {
 
 #[pymethods]
 impl SkiaTarget {
-    #[getter]
-    fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[getter]
-    fn height(&self) -> u32 {
-        self.height
-    }
-
     fn clear_rgba(&mut self, red: f32, green: f32, blue: f32, alpha: f32) {
         let color = Color::from_argb(
             (alpha * 255.0) as u8,
@@ -526,32 +502,6 @@ impl SkiaTarget {
         self.matrix_tx = tx;
         self.matrix_ty = ty;
         self.surface.canvas().set_matrix(&self.matrix);
-    }
-
-    fn new_path(&mut self) {
-        self.path.reset();
-    }
-
-    fn new_sub_path(&mut self) {
-        // Cairo's new_sub_path only resets the current point; the following
-        // move_to() starts the actual contour in Skia.
-    }
-
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.path.move_to(Point::new(x, y));
-    }
-
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.path.line_to(Point::new(x, y));
-    }
-
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
-        self.path
-            .cubic_to(Point::new(x1, y1), Point::new(x2, y2), Point::new(x3, y3));
-    }
-
-    fn close_path(&mut self) {
-        self.path.close();
     }
 
     /// Replace the current path with a whole cubic-Bezier path in one call.
@@ -996,28 +946,6 @@ impl SkiaTarget {
         Ok(())
     }
 
-    /// Flush Ganesh and copy the RGBA surface back to host memory.
-    fn commit(&mut self) -> PyResult<Vec<u8>> {
-        self.textures.end_frame();
-        self.context
-            .flush_and_submit()
-            .map_err(|error| PyRuntimeError::new_err(format!("Skia flush failed: {error:?}")))?;
-        let info = SkImageInfo::new(
-            (self.width as i32, self.height as i32),
-            ColorType::RGBA8888,
-            AlphaType::Unpremul,
-            None,
-        );
-        let mut pixels = vec![0u8; (self.width * self.height * 4) as usize];
-        if !self
-            .surface
-            .read_pixels(&info, &mut pixels, (self.width * 4) as usize, (0, 0))
-        {
-            return Err(PyRuntimeError::new_err("Skia surface read_pixels failed"));
-        }
-        Ok(pixels)
-    }
-
     /// Start reading the surface as I420 video without waiting for the GPU;
     /// returns a ticket for `collect_yuv420_into`.
     ///
@@ -1161,37 +1089,11 @@ impl SkiaTarget {
         }
         Ok(())
     }
-
-    /// Upload host RGBA pixels into the GPU surface.  Reads the caller's
-    /// C-contiguous buffer in place; the draw is submitted with the frame.
-    fn load_pixels(&mut self, pixels: &Bound<PyAny>) -> PyResult<()> {
-        let buffer = PyBuffer::<u8>::get(pixels)
-            .map_err(|error| PyValueError::new_err(format!("pixel buffer: {error}")))?;
-        let expected = (self.width * self.height * 4) as usize;
-        if buffer.item_count() != expected {
-            return Err(PyValueError::new_err("pixel buffer has the wrong size"));
-        }
-        let slice = buffer
-            .as_slice(pixels.py())
-            .ok_or_else(|| PyValueError::new_err("pixel buffer must be C-contiguous"))?;
-        // SAFETY: see raster_image; Skia only reads from the slice.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(slice.as_ptr() as *mut u8, expected) };
-        let info = SkImageInfo::new(
-            (self.width as i32, self.height as i32),
-            ColorType::RGBA8888,
-            AlphaType::Unpremul,
-            None,
-        );
-        let pixmap = skia_safe::Pixmap::new(&info, bytes, (self.width * 4) as usize)
-            .ok_or_else(|| PyRuntimeError::new_err("Skia Pixmap::new failed"))?;
-        self.surface.write_pixels_from_pixmap(&pixmap, (0, 0));
-        Ok(())
-    }
 }
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 3;
+const API_VERSION: u32 = 4;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {
