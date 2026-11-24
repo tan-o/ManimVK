@@ -14,6 +14,7 @@ on:
         default: ""
   push:
     branches:
+      - master
       - rust-core-preview
 
 concurrency:
@@ -129,6 +130,8 @@ jobs:
       - name: Compare
         run: |
           python tools/golden/compare.py --reference golden/cairo --candidate golden/vulkan --out golden/report
+          # In the log too, which can be read without downloading the artifact.
+          grep -v "| PASS |" golden/report/report.md
           {
             echo "## Golden: Cairo vs Vulkan (lavapipe)"
             grep -v "| PASS |" golden/report/report.md

@@ -1,4 +1,5 @@
 {
+  "docs_source_examples__MovingZoomedSceneAround": "Zooms into the same 2x4 image as ImageFromArray: the same bicubic kernel difference (PIL transform a = -1, Skia Catmull-Rom a = -0.5).",
   "manim_mobject_graphing_functions__DiscontinuousExample": "The red plot is smoothed across x = +-2, so its handles reach 1e15 and ring towards x = 0. Cairo drops the whole path; Skia draws the spikes those control points describe.",
   "manim_mobject_types_image_mobject__ImageFromArray": "A 2x4 image scaled 210x: Cairo uses PIL's transform bicubic (Keys a = -1), Vulkan Catmull-Rom (a = -0.5), the standard bicubic that PIL's resize also uses."
 }
