@@ -703,9 +703,12 @@ class ThreeDCamera(Camera):
         def z_key(mob: Mobject) -> float:
             if not (mob.depth_test or getattr(mob, "shade_in_3d", False)):
                 return np.inf  # type: ignore[no-any-return]
+            if mob.depth_test and isinstance(mob, VMobject):
+                # get_draw_order orders a depth-tested VMobject by its
+                # pieces; sorting it here would cost a pass over its many
+                # points for nothing.  Such mobjects keep their family order.
+                return 0.0
             if mob.depth_test and len(mob.points):
-                # Depth-tested mobjects can hold many thousands of points;
-                # their mean is cheaper than a bounding box.
                 return float(np.dot(mob.points.mean(axis=0), rot_matrix[2]))
             # Assign a number to a three dimensional mobjects
             # based on how close it is to the camera

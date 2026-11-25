@@ -153,16 +153,24 @@ class SkiaRenderer(_RendererExecutionView):
 
     def set_occlusion_culling(self, enabled: bool) -> None:
         """Whether depth pieces that cannot be seen are left out of drawing,
-        for every target, now and later (see
+        for every target, now and later, snapshot renderers included (see
         :meth:`SkiaRenderTarget.set_occlusion_culling`); on by default."""
         self._occlusion_culling = bool(enabled)
         for target in [self._target, *self._sub_targets.values()]:
             if target is not None:
                 target.set_occlusion_culling(enabled)
+        if self._snapshot_renderer is not None:
+            self._snapshot_renderer.set_occlusion_culling(enabled)
 
     def take_draw_stats(self) -> dict[str, float]:
-        """See :meth:`SkiaRenderTarget.take_draw_stats`, for the main target."""
-        return self._get_target().take_draw_stats()
+        """See :meth:`SkiaRenderTarget.take_draw_stats`: summed over the main
+        target and, while an evaluation draws through one, the snapshot
+        renderer."""
+        stats = self._get_target().take_draw_stats()
+        if self._snapshot_renderer is not None:
+            for key, value in self._snapshot_renderer.take_draw_stats().items():
+                stats[key] = stats.get(key, 0.0) + value
+        return stats
 
     def _sub_target_for(
         self,
@@ -483,6 +491,7 @@ class SkiaRenderer(_RendererExecutionView):
             camera=self.camera, _raster_settings=self._raster_settings
         )
         renderer._vk_device = self._ensure_device()
+        renderer._occlusion_culling = self._occlusion_culling
         return renderer
 
     @contextmanager

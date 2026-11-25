@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = ["MeshSurface", "TexturedSurface"]
 
+import hashlib
 from functools import cache
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any
@@ -161,9 +162,18 @@ class MeshSurface(Mobject):
         wraps, the poles of a sphere) as one, so that the lighting is smooth
         across seams and degenerate triangles leave no vertex without a
         normal.
+
+        The normals are kept until the points or triangles change: a surface
+        that only the camera moves around is welded once, not every frame.
         """
         if len(self.points) == 0:
             return np.zeros((0, 3))
+        digest = hashlib.blake2b(np.ascontiguousarray(self.points).data, digest_size=16)
+        digest.update(np.ascontiguousarray(self.triangles).data)
+        key = digest.digest()
+        cached = getattr(self, "_vertex_normals", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         corners = self.points[self.triangles]
         face_normals = np.cross(
             corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
@@ -179,7 +189,10 @@ class MeshSurface(Mobject):
         )
         normals = sums[welded]
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
-        return normals / np.where(lengths == 0, 1, lengths)
+        normals /= np.where(lengths == 0, 1, lengths)
+        normals.setflags(write=False)
+        self._vertex_normals = (key, normals)
+        return normals
 
 
 class TexturedSurface(MeshSurface):
