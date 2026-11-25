@@ -11,6 +11,7 @@
 - [ ] **把两张地球贴图放进 `example_scenes/hairy_ball/`**（脚本已入库）。`EarthTextureMap` / `NightEarthTextureMap` 在用户本机。
 - [ ] **跑 `HairyEarth` 的 1080p90 正式片**，并记录每段动画的 it/s。
 - [ ] **半透明球遮挡语义**：半透明网格挡住它后面的深度测试矢量（不论加入顺序），但不挡不透明网格；ManimGL 只挡后加入场景的对象。
+- [ ] **细描边在 GPU 上局部偏亮**：约 1.2 像素宽的线（坐标轴、刻度）在部分位置比 Cairo 的精确覆盖亮，8×8 块最大差 35/255（`docs/reports/RENDERING_AUDIT_2026-11.md`）。需要确认 Ganesh 选的是哪条路径渲染器，再决定处理方式。
 - [ ] **实现交互预览**（swapchain + 输入事件）。目前只有离线渲染；需要在有 GPU 的机器上开发和验收。
 - [ ] **`TexTemplateFromCLI`**：示例要求命令行传 `--tex_template`，场景渲染工具还不支持按场景传参（`tools/scenes/known_errors.json` 里唯一的已知错误）。
 
