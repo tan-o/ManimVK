@@ -43,7 +43,18 @@ def main() -> None:
     parser.add_argument("--frame-rate", type=int, default=30)
     parser.add_argument("--no-culling", action="store_true")
     parser.add_argument("--assets", type=Path, default=None)
+    parser.add_argument(
+        "--python-only",
+        action="store_true",
+        help="replace the native module with no-ops, to time the Python side alone",
+    )
     args = parser.parse_args()
+    if args.python_only:
+        from frame_cost import _NullDevice
+
+        from manim.renderer.skia import renderer as skia_renderer
+
+        skia_renderer.manim_vk.Device = _NullDevice
     width, height = (int(value) for value in args.size.split("x"))
 
     spec = importlib.util.spec_from_file_location(args.file.stem, args.file)
