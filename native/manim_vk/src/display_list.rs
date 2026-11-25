@@ -50,9 +50,11 @@ pub struct Object {
     points: Vec<Point>,
     rows: Vec<(usize, usize, i64)>,
     paints: Vec<Paint>,
-    /// How far its strokes reach beyond its points, in local units: half
-    /// the widest stroke, or a miter's reach at the miter limit.
+    /// How far its strokes reach beyond its points, in local units: along
+    /// a single curve (half the widest stroke, a square cap's corner), and
+    /// where curves join (a miter's tip at the miter limit).
     reach: f32,
+    joint_reach: f32,
 }
 
 /// Occlusion culling of depth pieces (see `occlusion`), with counts for
@@ -201,23 +203,23 @@ pub fn object((points_array, subpaths_array, paints): ObjectSpec) -> PyResult<Ob
         .map(|row| (row[0] as usize, row[1] as usize, row[2]))
         .collect();
     let paints: Vec<Paint> = paints.into_iter().filter_map(paint).collect();
-    let reach = paints
-        .iter()
-        .filter(|paint| paint.style() != Style::Fill)
-        .map(|paint| {
-            let half = 0.5 * paint.stroke_width();
-            match paint.stroke_join() {
-                Join::Miter => half * MITER_LIMIT,
-                // A square cap reaches half the width diagonally.
-                _ => half * std::f32::consts::SQRT_2,
-            }
-        })
+    let strokes = paints.iter().filter(|paint| paint.style() != Style::Fill);
+    let reach = strokes
+        .clone()
+        .map(|paint| 0.5 * paint.stroke_width() * std::f32::consts::SQRT_2)
         .fold(0.0, f32::max);
+    let joint_reach = strokes
+        .map(|paint| match paint.stroke_join() {
+            Join::Miter => 0.5 * paint.stroke_width() * MITER_LIMIT,
+            _ => 0.5 * paint.stroke_width() * std::f32::consts::SQRT_2,
+        })
+        .fold(reach, f32::max);
     Ok(Object {
         points: points(&points_array)?,
         rows,
         paints,
         reach,
+        joint_reach,
     })
 }
 
@@ -274,13 +276,16 @@ impl Object {
             self.draw_path(canvas, path);
             return;
         };
-        let reach = self.reach * to_device[0].abs().max(to_device[1].abs());
+        let scale = to_device[0].abs().max(to_device[1].abs());
         let mut tiled: Vec<((i32, i32), Chain)> = self
             .chains(pieces, to_device)
             .into_iter()
             .filter(|chain| {
                 let Some(cull) = cull else { return true };
                 cull.tested.set(cull.tested.get() + 1);
+                // Joins only where a chain has more than one curve.
+                let joined = chain.end - chain.start > 4 || chain.closed;
+                let reach = scale * if joined { self.joint_reach } else { self.reach };
                 let low = [chain.low[0] - reach, chain.low[1] - reach];
                 let high = [chain.high[0] + reach, chain.high[1] + reach];
                 let hidden = cull.occlusion.hidden(low, high, cull.occluding_key(key));

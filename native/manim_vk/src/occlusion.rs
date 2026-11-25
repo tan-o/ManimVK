@@ -94,13 +94,22 @@ impl Occlusion {
 
     /// Rasterise occluding triangles: `vertices` are `(x, y, key)` in device
     /// pixels and raw depth keys, three per triangle.
+    ///
+    /// They are rasterised nearest first, as occluders should be: the
+    /// buffer keeps a conservative depth per tile, and a far triangle (the
+    /// back of a sphere) covering a tile before the near ones would leave
+    /// the tile at the far depth.
     pub fn add_triangles(&mut self, vertices: &[f32]) {
-        let corners = vertices.len() / 3;
-        if corners < 3 {
+        let triangles: Vec<&[f32]> = vertices.chunks_exact(9).collect();
+        if triangles.is_empty() {
             return;
         }
+        let nearest = |triangle: &[f32]| triangle[2].max(triangle[5]).max(triangle[8]);
+        let mut order: Vec<usize> = (0..triangles.len()).collect();
+        order.sort_unstable_by(|&a, &b| nearest(triangles[b]).total_cmp(&nearest(triangles[a])));
+        let corners = triangles.len() * 3;
         let mut clip = Vec::with_capacity(corners * 3);
-        for vertex in vertices.chunks_exact(3) {
+        for vertex in order.iter().flat_map(|&index| triangles[index].chunks_exact(3)) {
             let w = 1.0 / vertex[2].max(f32::MIN_POSITIVE);
             let [x, y] = self.ndc([vertex[0], vertex[1]]);
             clip.extend_from_slice(&[x * w, y * w, w]);
