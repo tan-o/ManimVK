@@ -333,6 +333,19 @@ class SkiaRenderTarget:
         self._native.commit_into(frame)
         return frame
 
+    def set_occlusion_culling(self, enabled: bool) -> None:
+        """Whether depth pieces that cannot be seen (outside the frame, or
+        behind mesh surfaces) are left out of drawing; on by default.  The
+        frame is the same either way."""
+        self._ensure_open()
+        self._native.set_occlusion_culling(bool(enabled))
+
+    def culling_stats(self) -> tuple[int, int]:
+        """``(tested, culled)`` chains of depth pieces in the last display
+        list."""
+        self._ensure_open()
+        return tuple(self._native.culling_stats())
+
     def memory_usage(self) -> GpuMemory:
         self._ensure_open()
         return GpuMemory(*self._native.memory_usage())

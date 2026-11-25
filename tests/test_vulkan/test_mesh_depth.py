@@ -29,11 +29,14 @@ from manim.renderer.skia.renderer import SkiaRenderer  # noqa: E402
 WIDTH, HEIGHT = 480, 270
 
 
-def _render(camera, mobjects):
+def _render(camera, mobjects, culling=True, stats=None):
     with tempconfig({"pixel_width": WIDTH, "pixel_height": HEIGHT}):
         renderer = SkiaRenderer(camera=camera)
         try:
+            renderer.set_occlusion_culling(culling)
             renderer.render_mobjects(mobjects)
+            if stats is not None:
+                stats.append(renderer.culling_stats())
             return renderer.get_frame().astype(np.float64) / 255
         finally:
             renderer.close()
@@ -218,3 +221,29 @@ def test_a_fully_transparent_surface_hides_nothing():
     ).apply_depth_test()
     hidden = _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.0)
     np.testing.assert_array_equal(_render(camera, [hidden, line]), _render(camera, [line]))
+
+
+def test_occlusion_culling_leaves_the_frame_unchanged():
+    # Hairs all over a translucent sphere and an opaque one inside it, as in
+    # HairyEarth: those behind are culled before drawing, not clipped after.
+    camera = ThreeDCamera(phi=60 * DEGREES, theta=-80 * DEGREES)
+    rng = np.random.default_rng(3)
+    start = rng.normal(size=(4000, 3))
+    start *= 2.02 / np.linalg.norm(start, axis=1, keepdims=True)
+    end = start * 1.08
+    hairs = VMobject(stroke_color=WHITE, stroke_width=2, fill_opacity=0)
+    hairs.set_points(
+        np.stack([start, (2 * start + end) / 3, (start + 2 * end) / 3, end], axis=1).reshape(-1, 3)
+    )
+    hairs.apply_depth_test()
+    mobjects = [
+        _flat_sphere((0, 0, 0), 2.0, BLUE, opacity=0.4),
+        _flat_sphere((0.5, 0, 0), 1.2, RED),
+        hairs,
+    ]
+    stats = []
+    culled = _render(camera, mobjects, culling=True, stats=stats)
+    np.testing.assert_array_equal(culled, _render(camera, mobjects, culling=False))
+    tested, hidden = stats[0]
+    if tested:  # the native module (the CPU stand-in does not cull)
+        assert hidden > tested / 4, f"only {hidden} of {tested} chains culled"

@@ -17,6 +17,9 @@ pixels = "0.15"
 naga = { version = "0.19", features = ["glsl-in", "spv-out"] }
 skia-safe = { version = "0.157", default-features = false, features = ["binary-cache", "embed-icudtl", "ganesh", "jpeg", "textlayout", "vulkan"] }
 
+[build-dependencies]
+cc = "1"
+
 [patch.crates-io]
 ash = { path = "third_party/ash-0.37.3" }
 

@@ -76,6 +76,17 @@ translucent surface hides the depth-tested mobjects behind it and shows the
 camera background through itself.  Unlike ManimGL, this does not depend on
 the order mobjects were added.
 
+Pieces that cannot be seen are not drawn at all: as in Unity's Burst
+Occlusion Culling, the mesh surfaces are rasterised each frame on the CPU
+with Intel's Masked Occlusion Culling into a conservative hierarchical depth
+buffer, and a chain of pieces whose screen bounds lie outside the frame, or
+wholly behind the surfaces at its run's depth, is skipped before its path is
+built.  The test only culls what the per-pixel test would hide entirely, so
+the frame is the same with culling off
+(``SkiaRenderer.set_occlusion_culling(False)``); ``culling_stats()`` counts
+the chains tested and culled.  The library is built for x86; elsewhere
+nothing is culled.
+
 Custom shaders
 --------------
 

@@ -67,6 +67,12 @@ DOCS_RS=1 cargo clippy
   a translucent one against the second; each VMobject run with a depth key is
   clipped (`clipShader`) to where the second holds nothing nearer.  The pass's
   shaders are GLSL, compiled to SPIR-V with naga.
+- Occlusion culling (`occlusion.rs`): Intel's Masked Occlusion Culling
+  (`third_party/masked_occlusion_culling`, Apache-2.0, built by `build.rs` on
+  x86 with SSE4.1 and AVX2 variants picked at run time) rasterises the
+  frame's meshes on the CPU; chains of depth pieces outside the frame or
+  wholly behind them at their run's depth key are skipped.
+  `set_occlusion_culling(enabled)` and `culling_stats()`.
 - `memory_usage()` returns the driver's device-local heap usage
   (`VK_EXT_memory_budget`, None without it) and Skia's budgeted cache.
 

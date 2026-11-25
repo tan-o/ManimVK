@@ -20,7 +20,10 @@ use skia_safe::{
     gpu, Canvas, ClipOp, Color4f, Data, Paint, PathBuilder, Point, RuntimeEffect, TileMode,
 };
 
+use std::cell::Cell;
+
 use crate::meshes::{normalised_key, Frame, Mesh};
+use crate::occlusion::Occlusion;
 
 /// One paint of an object: stroke width (None fills), join, cap, colour stops
 /// `(offset, r, g, b, a)` and, for a gradient, its line `(x0, y0, x1, y1)`.
@@ -47,6 +50,19 @@ pub struct Object {
     points: Vec<Point>,
     rows: Vec<(usize, usize, i64)>,
     paints: Vec<Paint>,
+    /// How far its strokes reach beyond its points, in local units: half
+    /// the widest stroke, or a miter's reach at the miter limit.
+    reach: f32,
+}
+
+/// Occlusion culling of depth pieces (see `occlusion`), with counts for
+/// `culling_stats`.
+pub struct Cull<'a> {
+    pub occlusion: &'a Occlusion,
+    /// The frame's mesh key range (see `normalised_key`).
+    pub range: Option<(f32, f32)>,
+    pub tested: Cell<usize>,
+    pub culled: Cell<usize>,
 }
 
 pub fn int_rows(array: &Bound<PyAny>, width: usize, name: &str) -> PyResult<Vec<i64>> {
@@ -184,10 +200,24 @@ pub fn object((points_array, subpaths_array, paints): ObjectSpec) -> PyResult<Ob
         .chunks_exact(3)
         .map(|row| (row[0] as usize, row[1] as usize, row[2]))
         .collect();
+    let paints: Vec<Paint> = paints.into_iter().filter_map(paint).collect();
+    let reach = paints
+        .iter()
+        .filter(|paint| paint.style() != Style::Fill)
+        .map(|paint| {
+            let half = 0.5 * paint.stroke_width();
+            match paint.stroke_join() {
+                Join::Miter => half * MITER_LIMIT,
+                // A square cap reaches half the width diagonally.
+                _ => half * std::f32::consts::SQRT_2,
+            }
+        })
+        .fold(0.0, f32::max);
     Ok(Object {
         points: points(&points_array)?,
         rows,
-        paints: paints.into_iter().filter_map(paint).collect(),
+        paints,
+        reach,
     })
 }
 
@@ -220,13 +250,17 @@ impl Object {
     /// Pieces are joined in index order: a piece that starts where the
     /// previous one ended, in the same subpath, continues it, so the curves
     /// of a stroke drawn together keep their joins; a subpath drawn from its
-    /// first piece to its last is closed if it is closed.  The chains are
-    /// drawn one path per screen tile (see [`TILE`]).
+    /// first piece to its last is closed if it is closed.  With `cull`,
+    /// chains outside the frame, or wholly behind the meshes at the run's
+    /// raw depth key `key`, are left out.  The chains are drawn one path per
+    /// screen tile (see [`TILE`]).
     fn draw(
         &self,
         canvas: &Canvas,
         pieces: Option<&[i64]>,
+        key: f32,
         to_device: [f32; 4],
+        cull: Option<&Cull>,
         path: &mut PathBuilder,
     ) {
         if self.paints.is_empty() {
@@ -240,9 +274,19 @@ impl Object {
             self.draw_path(canvas, path);
             return;
         };
+        let reach = self.reach * to_device[0].abs().max(to_device[1].abs());
         let mut tiled: Vec<((i32, i32), Chain)> = self
             .chains(pieces, to_device)
             .into_iter()
+            .filter(|chain| {
+                let Some(cull) = cull else { return true };
+                cull.tested.set(cull.tested.get() + 1);
+                let low = [chain.low[0] - reach, chain.low[1] - reach];
+                let high = [chain.high[0] + reach, chain.high[1] + reach];
+                let hidden = cull.occlusion.hidden(low, high, cull.occluding_key(key));
+                cull.culled.set(cull.culled.get() + usize::from(hidden));
+                !hidden
+            })
             .map(|chain| {
                 let x = 0.5 * (chain.low[0] + chain.high[0]);
                 let y = 0.5 * (chain.low[1] + chain.high[1]);
@@ -333,6 +377,24 @@ half4 main(float2 p) {
 }
 ";
 
+impl Cull<'_> {
+    /// The raw depth key an occluder must exceed to hide every pixel of a
+    /// run with raw key `key` from the per-pixel test ([`DEPTH_CLIP_SKSL`]):
+    /// the run's normalised key plus that test's slack, mapped back, with a
+    /// margin for the 24-bit depth image.  Culling with it only removes what
+    /// the test would clip away entirely.  NaN (never occluded) for a run
+    /// without a key.
+    fn occluding_key(&self, key: f32) -> f32 {
+        match self.range {
+            Some((low, high)) if key.is_finite() => {
+                let scale = (1.0 - 2.0 / 1024.0) / (high - low).max(f32::MIN_POSITIVE);
+                low + (normalised_key(key, (low, high)) + 1e-6) / scale
+            }
+            _ => f32::NAN,
+        }
+    }
+}
+
 /// Run kinds in the first column of `runs`.
 const VMOBJECT: i64 = 0;
 const MESH: i64 = 1;
@@ -340,9 +402,10 @@ const MESH: i64 = 1;
 /// Draw `runs`, `(m, 4)` int64 rows of `(kind, object, start, end)`: the
 /// mesh `object`, or the VMobject `object` with the pieces
 /// `parts[start..end]` (indices into its rows), or all of it when
-/// `start == end`.  `keys` holds the depth key of each run, NaN for a run
-/// drawn without the depth test; `clip` is the compiled
-/// [`DEPTH_CLIP_SKSL`].
+/// `start == end`.  `keys` holds the raw depth key of each run (its
+/// nearest part), NaN for a run drawn without the depth test; `clip` is the
+/// compiled [`DEPTH_CLIP_SKSL`], and `cull` leaves out pieces that cannot
+/// be seen.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     canvas: &Canvas,
@@ -351,6 +414,7 @@ pub fn draw(
     meshes: &[Mesh],
     frame: &Frame,
     clip: &RuntimeEffect,
+    cull: Option<&Cull>,
     runs: &Bound<PyAny>,
     parts: &Bound<PyAny>,
     keys: &[f32],
@@ -378,7 +442,7 @@ pub fn draw(
                     _ => None,
                 };
                 match tested {
-                    None => object.draw(canvas, pieces, frame.to_device, &mut path),
+                    None => object.draw(canvas, pieces, key, frame.to_device, cull, &mut path),
                     Some(key) => {
                         let shader = clip
                             .make_shader(
@@ -393,7 +457,7 @@ pub fn draw(
                         canvas.reset_matrix();
                         canvas.clip_shader(shader, ClipOp::Intersect);
                         canvas.set_matrix(&matrix);
-                        object.draw(canvas, pieces, frame.to_device, &mut path);
+                        object.draw(canvas, pieces, key, frame.to_device, cull, &mut path);
                         canvas.restore();
                     }
                 }

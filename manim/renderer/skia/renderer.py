@@ -149,6 +149,15 @@ class SkiaRenderer(_RendererExecutionView):
         """GPU memory in use now (see :class:`GpuMemory`)."""
         return self._get_target().memory_usage()
 
+    def set_occlusion_culling(self, enabled: bool) -> None:
+        """See :meth:`SkiaRenderTarget.set_occlusion_culling`."""
+        self._get_target().set_occlusion_culling(enabled)
+
+    def culling_stats(self) -> tuple[int, int]:
+        """``(tested, culled)`` chains of depth pieces in the last display
+        list."""
+        return self._get_target().culling_stats()
+
     def _sub_target_for(
         self,
         image_mobject: ImageMobjectFromCamera,

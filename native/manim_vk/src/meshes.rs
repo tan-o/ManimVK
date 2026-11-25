@@ -332,6 +332,24 @@ impl Mesh {
         debug_assert_eq!(out.len() % depth::VERTEX_FLOATS, 0);
     }
 
+    /// The triangles that hide VMobjects (those of `depth_vertices` with
+    /// `translucent`), as `(x, y, raw key)` in device pixels, for occlusion
+    /// culling.
+    pub fn occluder_vertices(&self, to_device: [f32; 4], out: &mut Vec<f32>) {
+        let Some(keys) = &self.keys else { return };
+        if !(self.is_opaque() || self.opacity > 0.0) {
+            return;
+        }
+        for triangle in &self.triangles {
+            for &corner in triangle {
+                let [x, y] = self.xy[corner as usize];
+                out.push(x * to_device[0] + to_device[2]);
+                out.push(y * to_device[1] + to_device[3]);
+                out.push(keys[corner as usize]);
+            }
+        }
+    }
+
     fn image_shader(image: &Option<(Image, [f32; 2])>) -> Shader {
         image
             .as_ref()

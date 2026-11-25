@@ -90,6 +90,9 @@ class _NullTarget:
     def memory_usage(self) -> tuple[None, int, int]:
         return (None, 0, 0)
 
+    def culling_stats(self) -> tuple[int, int]:
+        return (0, 0)
+
 
 class _NullDevice:
     def __init__(self, *args, **kwargs) -> None:
@@ -124,6 +127,9 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--size", default="1920x1080")
     parser.add_argument("--python-only", action="store_true")
+    parser.add_argument(
+        "--no-culling", action="store_true", help="draw depth pieces behind meshes too"
+    )
     args = parser.parse_args()
     if args.python_only:
         skia_renderer.manim_vk.Device = _NullDevice
@@ -140,10 +146,12 @@ def main() -> None:
         for name in args.scenes:
             camera, mobjects, step = builders[name]()
             renderer = skia_renderer.SkiaRenderer(camera=camera)
+            if args.no_culling:
+                renderer.set_occlusion_culling(False)
             try:
                 renderer.render_mobjects(mobjects)
                 renderer.get_frame()
-                cpu, gpu, memory = [], [], []
+                cpu, gpu, memory, culled = [], [], [], []
                 for frame in range(args.frames):
                     step(frame)
                     started = time.perf_counter()
@@ -153,6 +161,7 @@ def main() -> None:
                     cpu.append(recorded - started)
                     gpu.append(time.perf_counter() - recorded)
                     memory.append(renderer.memory_usage())
+                    culled.append(renderer.culling_stats())
             finally:
                 renderer.close()
             cpu_ms, gpu_ms = 1000 * np.array(cpu), 1000 * np.array(gpu)
@@ -164,6 +173,9 @@ def main() -> None:
                 f"({args.frames} frames at {width}x{height})"
             )
             print(f"{'':6s} {_memory_report(memory)}")
+            tested, hidden = np.median(np.array(culled), axis=0)
+            if tested:
+                print(f"{'':6s} culled {hidden:.0f} of {tested:.0f} chains of depth pieces")
 
 
 if __name__ == "__main__":

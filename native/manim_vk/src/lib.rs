@@ -7,6 +7,7 @@
 mod depth;
 mod display_list;
 mod meshes;
+mod occlusion;
 mod textures;
 mod window;
 
@@ -351,6 +352,12 @@ struct SkiaTarget {
     all_depth: Option<depth::DepthPass>,
     /// The per-pixel depth test of VMobject runs, compiled on first use.
     depth_clip: Option<RuntimeEffect>,
+    /// Occlusion culling of depth pieces behind meshes (see `occlusion`),
+    /// its buffer made on first use, and the pieces tested and culled in
+    /// the last display list.
+    occlusion_culling: bool,
+    occlusion: Option<occlusion::Occlusion>,
+    culling_stats: (usize, usize),
     /// The last transient background image (see `set_source_image`).
     transient_image: Option<(u64, Image)>,
     /// YUV reads in flight, oldest first, by ticket.
@@ -411,6 +418,9 @@ impl SkiaTarget {
             opaque_depth: None,
             all_depth: None,
             depth_clip: None,
+            occlusion_culling: true,
+            occlusion: None,
+            culling_stats: (0, 0),
             yuv_reads: VecDeque::new(),
             next_ticket: 0,
         })
@@ -655,7 +665,7 @@ impl SkiaTarget {
     /// Draw a frame's VMobjects and meshes in one call; see
     /// `display_list::draw`.  The canvas matrix maps their scene points.
     /// Mesh textures, with mipmaps, are kept per key.  `keys` is float32,
-    /// one depth key per run.
+    /// one raw depth key per run.
     fn draw_display_list<'py>(
         &mut self,
         objects: Vec<display_list::ObjectSpec<'py>>,
@@ -737,17 +747,55 @@ impl SkiaTarget {
             to_device,
         };
         let clip = self.depth_clip.clone().expect("compiled above");
-        display_list::draw(
+        // Every mesh that hides VMobjects is an occluder.
+        let mut occluders = Vec::new();
+        if self.occlusion_culling {
+            for mesh in &prepared {
+                mesh.occluder_vertices(to_device, &mut occluders);
+            }
+            if self.occlusion.is_none() {
+                self.occlusion = occlusion::Occlusion::new(self.width, self.height);
+            }
+            if let Some(buffer) = &mut self.occlusion {
+                buffer.clear();
+                buffer.add_triangles(&occluders);
+            }
+        }
+        let cull = self.occlusion.as_ref().filter(|_| self.occlusion_culling).map(|buffer| {
+            display_list::Cull {
+                occlusion: buffer,
+                range: key_range,
+                tested: Default::default(),
+                culled: Default::default(),
+            }
+        });
+        let result = display_list::draw(
             self.surface.canvas(),
             &mut self.context,
             &objects,
             &prepared,
             &frame,
             &clip,
+            cull.as_ref(),
             runs,
             parts,
             &keys,
-        )
+        );
+        self.culling_stats = cull.map_or((0, 0), |cull| (cull.tested.get(), cull.culled.get()));
+        result
+    }
+
+    /// Whether display lists leave out depth pieces that cannot be seen
+    /// (outside the frame, or behind mesh surfaces); on by default.  The
+    /// frame is the same either way.
+    fn set_occlusion_culling(&mut self, enabled: bool) {
+        self.occlusion_culling = enabled;
+    }
+
+    /// `(tested, culled)` depth pieces (chains of them) of the last
+    /// display list.
+    fn culling_stats(&self) -> (usize, usize) {
+        self.culling_stats
     }
 
     fn set_line_width(&mut self, width: f32) {
@@ -1258,7 +1306,7 @@ impl SkiaTarget {
 
 /// The interface level `manim._native` expects: bump it, there and here,
 /// whenever a method is added or changes its signature or behaviour.
-const API_VERSION: u32 = 7;
+const API_VERSION: u32 = 8;
 
 #[pymodule]
 fn manim_vk(module: &Bound<'_, PyModule>) -> PyResult<()> {
