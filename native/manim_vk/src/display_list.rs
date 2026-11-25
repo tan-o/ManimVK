@@ -448,10 +448,10 @@ pub fn draw(
                 };
                 match tested {
                     None => object.draw(canvas, pieces, key, frame.to_device, cull, &mut path),
-                    Some(key) => {
+                    Some(normalised) => {
                         let shader = clip
                             .make_shader(
-                                Data::new_copy(&key.to_ne_bytes()),
+                                Data::new_copy(&normalised.to_ne_bytes()),
                                 &[ChildPtr::from(frame.all_depth.clone())],
                                 None,
                             )
