@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ash::vk;
 use pyo3::buffer::PyBuffer;
@@ -320,6 +321,19 @@ fn skia_get_proc(inner: &DeviceInner, of: gpu::vk::GetProcOf) -> *const std::ffi
 }
 
 /// A Skia Ganesh surface backed by the same Vulkan device as `Device`.
+/// See `SkiaTarget::take_draw_stats`.
+#[derive(Default)]
+struct DrawStats {
+    input: f64,
+    depth: f64,
+    occlusion: f64,
+    paths: f64,
+    skia: f64,
+    meshes: f64,
+    tested: usize,
+    culled: usize,
+}
+
 #[pyclass(unsendable)]
 struct SkiaTarget {
     /// Never read: keeps the Vulkan device alive while the surface exists.
@@ -357,7 +371,9 @@ struct SkiaTarget {
     /// the last display list.
     occlusion_culling: bool,
     occlusion: Option<occlusion::Occlusion>,
-    culling_stats: (usize, usize),
+    /// Where display lists spent their time, and the chains of depth pieces
+    /// tested and culled, since the last `take_draw_stats`.
+    draw_stats: DrawStats,
     /// The last transient background image (see `set_source_image`).
     transient_image: Option<(u64, Image)>,
     /// YUV reads in flight, oldest first, by ticket.
@@ -420,7 +436,7 @@ impl SkiaTarget {
             depth_clip: None,
             occlusion_culling: true,
             occlusion: None,
-            culling_stats: (0, 0),
+            draw_stats: DrawStats::default(),
             yuv_reads: VecDeque::new(),
             next_ticket: 0,
         })
@@ -674,6 +690,7 @@ impl SkiaTarget {
         parts: &Bound<'py, PyAny>,
         keys: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
+        let started = Instant::now();
         let keys = PyBuffer::<f32>::get(keys)
             .and_then(|buffer| buffer.to_vec(keys.py()))
             .map_err(|error| PyValueError::new_err(format!("run keys: {error}")))?;
@@ -707,6 +724,7 @@ impl SkiaTarget {
                 mesh.depth_vertices(to_device, true, &mut all);
             }
         }
+        let read = Instant::now();
         let has_opaque = !opaque.is_empty();
         let has_any = !all.is_empty();
         let opaque_depth = Self::depth_image(
@@ -747,6 +765,7 @@ impl SkiaTarget {
             to_device,
         };
         let clip = self.depth_clip.clone().expect("compiled above");
+        let depth = Instant::now();
         // Every mesh that hides VMobjects is an occluder.
         let mut occluders = Vec::new();
         if self.occlusion_culling {
@@ -761,6 +780,7 @@ impl SkiaTarget {
                 buffer.add_triangles(&occluders);
             }
         }
+        let occlusion = Instant::now();
         let cull = self.occlusion.as_ref().filter(|_| self.occlusion_culling).map(|buffer| {
             display_list::Cull {
                 occlusion: buffer,
@@ -781,7 +801,18 @@ impl SkiaTarget {
             parts,
             &keys,
         );
-        self.culling_stats = cull.map_or((0, 0), |cull| (cull.tested.get(), cull.culled.get()));
+        let (skia, meshes) = display_list::take_times();
+        let stats = &mut self.draw_stats;
+        stats.input += (read - started).as_secs_f64();
+        stats.depth += (depth - read).as_secs_f64();
+        stats.occlusion += (occlusion - depth).as_secs_f64();
+        stats.meshes += meshes;
+        stats.skia += skia;
+        stats.paths += occlusion.elapsed().as_secs_f64() - meshes - skia;
+        if let Some(cull) = cull {
+            stats.tested += cull.tested.get();
+            stats.culled += cull.culled.get();
+        }
         result
     }
 
@@ -792,10 +823,26 @@ impl SkiaTarget {
         self.occlusion_culling = enabled;
     }
 
-    /// `(tested, culled)` depth pieces (chains of them) of the last
-    /// display list.
-    fn culling_stats(&self) -> (usize, usize) {
-        self.culling_stats
+    /// Where display lists spent their time since the last call, in
+    /// seconds, and the chains of depth pieces tested and culled: `input`
+    /// (reading objects and meshes from Python), `depth` (the depth
+    /// passes), `occlusion` (rasterising occluders), `paths` (building
+    /// paths and culling), `skia` (Skia recording the paths, stroking
+    /// included), `meshes` (drawing meshes).
+    fn take_draw_stats(&mut self) -> std::collections::HashMap<&'static str, f64> {
+        let stats = std::mem::take(&mut self.draw_stats);
+        [
+            ("input", stats.input),
+            ("depth", stats.depth),
+            ("occlusion", stats.occlusion),
+            ("paths", stats.paths),
+            ("skia", stats.skia),
+            ("meshes", stats.meshes),
+            ("tested", stats.tested as f64),
+            ("culled", stats.culled as f64),
+        ]
+        .into_iter()
+        .collect()
     }
 
     fn set_line_width(&mut self, width: f32) {

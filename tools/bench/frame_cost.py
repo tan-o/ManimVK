@@ -90,8 +90,8 @@ class _NullTarget:
     def memory_usage(self) -> tuple[None, int, int]:
         return (None, 0, 0)
 
-    def culling_stats(self) -> tuple[int, int]:
-        return (0, 0)
+    def take_draw_stats(self) -> dict[str, float]:
+        return {}
 
 
 class _NullDevice:
@@ -103,6 +103,21 @@ class _NullDevice:
 
     def create_skia_target(self, width: int, height: int) -> _NullTarget:
         return _NullTarget()
+
+
+def _draw_report(stats: list[dict[str, float]]) -> str:
+    """Median native drawing time per stage, and the chains culled."""
+    if not stats or not stats[0]:
+        return "native stages: not measured"
+    median = {key: float(np.median([row[key] for row in stats])) for key in stats[0]}
+    stages = ", ".join(
+        f"{key} {median[key] * 1000:.1f}"
+        for key in ("input", "depth", "occlusion", "paths", "skia", "meshes")
+    )
+    return (
+        f"native ms: {stages}; culled {median['culled']:.0f} of "
+        f"{median['tested']:.0f} chains"
+    )
 
 
 def _memory_report(memory) -> str:
@@ -161,7 +176,7 @@ def main() -> None:
                     cpu.append(recorded - started)
                     gpu.append(time.perf_counter() - recorded)
                     memory.append(renderer.memory_usage())
-                    culled.append(renderer.culling_stats())
+                    culled.append(renderer.take_draw_stats())
             finally:
                 renderer.close()
             cpu_ms, gpu_ms = 1000 * np.array(cpu), 1000 * np.array(gpu)
@@ -173,9 +188,7 @@ def main() -> None:
                 f"({args.frames} frames at {width}x{height})"
             )
             print(f"{'':6s} {_memory_report(memory)}")
-            tested, hidden = np.median(np.array(culled), axis=0)
-            if tested:
-                print(f"{'':6s} culled {hidden:.0f} of {tested:.0f} chains of depth pieces")
+            print(f"{'':6s} {_draw_report(culled)}")
 
 
 if __name__ == "__main__":

@@ -72,7 +72,8 @@ DOCS_RS=1 cargo clippy
   x86 with SSE4.1 and AVX2 variants picked at run time) rasterises the
   frame's meshes on the CPU; chains of depth pieces outside the frame or
   wholly behind them at their run's depth key are skipped.
-  `set_occlusion_culling(enabled)` and `culling_stats()`.
+  `set_occlusion_culling(enabled)`; `take_draw_stats()` returns the time
+  display lists spent per stage and the chains tested and culled.
 - `memory_usage()` returns the driver's device-local heap usage
   (`VK_EXT_memory_budget`, None without it) and Skia's budgeted cache.
 

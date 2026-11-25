@@ -340,11 +340,12 @@ class SkiaRenderTarget:
         self._ensure_open()
         self._native.set_occlusion_culling(bool(enabled))
 
-    def culling_stats(self) -> tuple[int, int]:
-        """``(tested, culled)`` chains of depth pieces in the last display
-        list."""
+    def take_draw_stats(self) -> dict[str, float]:
+        """Where drawing spent its time since the last call, in seconds, and
+        the chains of depth pieces tested and culled (see the native
+        ``take_draw_stats``)."""
         self._ensure_open()
-        return tuple(self._native.culling_stats())
+        return dict(self._native.take_draw_stats())
 
     def memory_usage(self) -> GpuMemory:
         self._ensure_open()

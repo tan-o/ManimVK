@@ -36,7 +36,8 @@ def _render(camera, mobjects, culling=True, stats=None):
             renderer.set_occlusion_culling(culling)
             renderer.render_mobjects(mobjects)
             if stats is not None:
-                stats.append(renderer.culling_stats())
+                draw = renderer.take_draw_stats()
+                stats.append((draw["tested"], draw["culled"]))
             return renderer.get_frame().astype(np.float64) / 255
         finally:
             renderer.close()

@@ -72,6 +72,7 @@ class SkiaRenderer(_RendererExecutionView):
         # Targets of MultiCamera views, by the id of their ImageMobjectFromCamera,
         # and the views drawn in the current frame.
         self._sub_targets: dict[int, SkiaRenderTarget] = {}
+        self._occlusion_culling = True
         self._drawn_views: set[int] = set()
         # A finished scene whose final state is drawn on the first pixel read.
         self._final_scene: Scene | None = None
@@ -143,6 +144,7 @@ class SkiaRenderer(_RendererExecutionView):
             self._target = SkiaRenderTarget(
                 self._raster_settings, self._image_files, device=self._ensure_device()
             )
+            self._target.set_occlusion_culling(self._occlusion_culling)
         return self._target
 
     def memory_usage(self) -> GpuMemory:
@@ -150,13 +152,17 @@ class SkiaRenderer(_RendererExecutionView):
         return self._get_target().memory_usage()
 
     def set_occlusion_culling(self, enabled: bool) -> None:
-        """See :meth:`SkiaRenderTarget.set_occlusion_culling`."""
-        self._get_target().set_occlusion_culling(enabled)
+        """Whether depth pieces that cannot be seen are left out of drawing,
+        for every target, now and later (see
+        :meth:`SkiaRenderTarget.set_occlusion_culling`); on by default."""
+        self._occlusion_culling = bool(enabled)
+        for target in [self._target, *self._sub_targets.values()]:
+            if target is not None:
+                target.set_occlusion_culling(enabled)
 
-    def culling_stats(self) -> tuple[int, int]:
-        """``(tested, culled)`` chains of depth pieces in the last display
-        list."""
-        return self._get_target().culling_stats()
+    def take_draw_stats(self) -> dict[str, float]:
+        """See :meth:`SkiaRenderTarget.take_draw_stats`, for the main target."""
+        return self._get_target().take_draw_stats()
 
     def _sub_target_for(
         self,
@@ -198,6 +204,7 @@ class SkiaRenderer(_RendererExecutionView):
                 self._image_files,
                 device=self._ensure_device(),
             )
+            target.set_occlusion_culling(self._occlusion_culling)
             self._sub_targets[key] = target
         return target
 

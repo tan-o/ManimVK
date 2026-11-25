@@ -21,6 +21,7 @@ use skia_safe::{
 };
 
 use std::cell::Cell;
+use std::time::Instant;
 
 use crate::meshes::{normalised_key, Frame, Mesh};
 use crate::occlusion::Occlusion;
@@ -58,7 +59,7 @@ pub struct Object {
 }
 
 /// Occlusion culling of depth pieces (see `occlusion`), with counts for
-/// `culling_stats`.
+/// `take_draw_stats`.
 pub struct Cull<'a> {
     pub occlusion: &'a Occlusion,
     /// The frame's mesh key range (see `normalised_key`).
@@ -311,9 +312,11 @@ impl Object {
 
     fn draw_path(&self, canvas: &Canvas, path: &mut PathBuilder) {
         let path = path.snapshot();
+        let started = Instant::now();
         for paint in &self.paints {
             canvas.draw_path(&path, paint);
         }
+        TIMES.with(|times| times.set((times.get().0 + started.elapsed().as_secs_f64(), times.get().1)));
     }
 
     /// The listed pieces joined into chains (see [`Object::draw`]).
@@ -400,6 +403,18 @@ impl Cull<'_> {
     }
 }
 
+thread_local! {
+    /// Seconds spent in Skia's `draw_path` (recording, which includes
+    /// stroking paths on the CPU) and in drawing meshes, since the last
+    /// `take_times`.
+    static TIMES: Cell<(f64, f64)> = const { Cell::new((0.0, 0.0)) };
+}
+
+/// `(skia path recording, meshes)` seconds since the last call.
+pub fn take_times() -> (f64, f64) {
+    TIMES.with(|times| times.replace((0.0, 0.0)))
+}
+
 /// Run kinds in the first column of `runs`.
 const VMOBJECT: i64 = 0;
 const MESH: i64 = 1;
@@ -467,10 +482,13 @@ pub fn draw(
                     }
                 }
             }
-            MESH => meshes
-                .get(index)
-                .ok_or_else(missing)?
-                .draw(canvas, context, frame)?,
+            MESH => {
+                let started = Instant::now();
+                meshes.get(index).ok_or_else(missing)?.draw(canvas, context, frame)?;
+                TIMES.with(|times| {
+                    times.set((times.get().0, times.get().1 + started.elapsed().as_secs_f64()))
+                });
+            }
             _ => return Err(PyValueError::new_err(format!("unknown run kind {kind}"))),
         }
     }

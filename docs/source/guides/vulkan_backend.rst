@@ -83,7 +83,7 @@ buffer, and a chain of pieces whose screen bounds lie outside the frame, or
 wholly behind the surfaces at its run's depth, is skipped before its path is
 built.  The test only culls what the per-pixel test would hide entirely, so
 the frame is the same with culling off
-(``SkiaRenderer.set_occlusion_culling(False)``); ``culling_stats()`` counts
+(``SkiaRenderer.set_occlusion_culling(False)``); ``take_draw_stats()`` counts
 the chains tested and culled.  The library is built for x86; elsewhere
 nothing is culled.
 
