@@ -97,7 +97,7 @@ custom effects use `SkSLMobject`.
 - The native modules are built from `native/manim_core` and `native/manim_vk`
   (see their READMEs); rebuild both after pulling changes there, as
   `import manim` refuses modules built from older sources.
-- Every push to `master` or `rust-core-preview` runs the test suite and
+- Every push to `master` or `codex/vulkan-skia-audit` runs the test suite and
   renders every example scene on Vulkan in CI
   (`.github/workflows/scenes.yml`).  Open work is listed in `TODO.md`.
 

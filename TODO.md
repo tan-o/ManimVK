@@ -2,7 +2,7 @@
 
 本文件只列“还没完成”的事项；已完成的历史记录见 `docs/reports/` 和提交记录。
 
-验收方式：每次推到 `rust-core-preview`，GitHub Actions（lavapipe 上的真实 Skia/Vulkan）跑完整 `tests/`、渲染一段视频、渲染全部示例场景；全绿才快进合并到 `master`。
+验收方式：每次推到 `codex/vulkan-skia-audit`，GitHub Actions（lavapipe 上的真实 Skia/Vulkan）跑完整 `tests/`、渲染一段视频、渲染全部示例场景；全绿才快进合并到 `master`。
 
 ---
 

@@ -15,7 +15,7 @@ on:
   push:
     branches:
       - master
-      - rust-core-preview
+      - codex/vulkan-skia-audit
 
 concurrency:
   group: scenes-${{ github.ref }}
